@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from google import genai
+from sqlalchemy.exc import IntegrityError
 from google.genai import types
 
 from database import engine, Base, get_db
@@ -96,7 +97,8 @@ def check_db_health(db: Session = Depends(get_db)):
 @app.post("/analyze-document")
 async def analyze_document(
     file: UploadFile = File(...),
-    bank_name: str = Form("a Tier-1 Global Bank")
+    bank_name: str = Form("a Tier-1 Global Bank"),
+    db: Session = Depends(get_db) # 1. Inject the database session here
 ):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -116,7 +118,7 @@ async def analyze_document(
         You are an expert Chief Compliance Officer operating on behalf of {bank_name}.
         Your objective is to protect {bank_name} from regulatory fines and corporate fraud.
 
-        Analyze the following corporate document text and extract the key risks.
+        Analyze the following corporate document text and extract the key risks, along with the company's legal identity.
 
         Document Text:
         {extracted_text}
@@ -130,6 +132,9 @@ async def analyze_document(
                 response_schema={
                     "type": "OBJECT",
                     "properties": {
+                        "company_name": {"type": "STRING", "description": "The legal name of the company."},
+                        "registration_number": {"type": "STRING", "description": "The corporate registration number (or 'UNKNOWN' if missing)."},
+                        "country_of_incorporation": {"type": "STRING", "description": "The country where the company is registered."},
                         "esg_risks": {
                             "type": "ARRAY",
                             "items": {"type": "STRING"},
@@ -149,11 +154,38 @@ async def analyze_document(
             )
         )
 
+        analysis_data = json.loads(response.text)
+
+        # 2. Save to PostgreSQL Database
+        try:
+            # Check if this company already exists in our database
+            reg_num = analysis_data.get("registration_number", f"UNKNOWN-{file.filename}")
+            existing_entity = db.query(models.CorporateEntity).filter(models.CorporateEntity.registration_number == reg_num).first()
+
+            if existing_entity:
+                # Update the existing record with the new risk score
+                existing_entity.ai_risk_score = analysis_data.get("overall_risk_score", 0.0)
+            else:
+                # Create a brand new record
+                new_entity = models.CorporateEntity(
+                    company_name=analysis_data.get("company_name", "Unknown Company"),
+                    registration_number=reg_num,
+                    country_of_incorporation=analysis_data.get("country_of_incorporation", "Unknown"),
+                    ai_risk_score=analysis_data.get("overall_risk_score", 0.0)
+                )
+                db.add(new_entity)
+            
+            db.commit()
+            
+        except IntegrityError:
+            db.rollback()
+            logger.warning(f"Database integrity error while saving {file.filename}")
+
         return {
             "status": "success",
             "tenant": bank_name,
             "filename": file.filename,
-            "analysis": json.loads(response.text)
+            "analysis": analysis_data
         }
 
     except Exception as e:
