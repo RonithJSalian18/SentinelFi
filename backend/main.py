@@ -81,6 +81,111 @@ async def zero_trust_security_shield(request: Request, call_next):
 
 
 # --- API ROUTES ---
+@app.post("/aml/seed-dummy-data")
+def seed_aml_data(db: Session = Depends(get_db)):
+    """Creates a circular trading loop for testing, ensuring no duplicates."""
+    try:
+        # 1. Check if the dummy data is already in the database
+        existing_company = db.query(models.CorporateEntity).filter(
+            models.CorporateEntity.registration_number == "AH-001"
+        ).first()
+        
+        if existing_company:
+            return {"status": "success", "message": "Dummy ledger already seeded. Ready to scan."}
+
+        # 2. Create 3 Shell Companies
+        co_a = models.CorporateEntity(company_name="Alpha Holdings", registration_number="AH-001")
+        co_b = models.CorporateEntity(company_name="Beta Logistics", registration_number="BL-002")
+        co_c = models.CorporateEntity(company_name="Gamma Consulting", registration_number="GC-003")
+        
+        db.add_all([co_a, co_b, co_c])
+        db.commit()
+
+        # 3. Create the Money Laundering Loop (A -> B -> C -> A)
+        t1 = models.TransactionLedger(sender_id=co_a.id, receiver_id=co_b.id, amount=500000)
+        t2 = models.TransactionLedger(sender_id=co_b.id, receiver_id=co_c.id, amount=495000)
+        t3 = models.TransactionLedger(sender_id=co_c.id, receiver_id=co_a.id, amount=490000)
+        
+        db.add_all([t1, t2, t3])
+        db.commit()
+        
+        return {"status": "success", "message": "Dummy money laundering loop created."}
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/aml/detect-circular-trading")
+def detect_circular_trading(db: Session = Depends(get_db)):
+    """
+    Executes a 3-way Self-Join combined with entity lookups to detect closed-loop transactions.
+    """
+    sql_query = text("""
+        SELECT 
+            c1.company_name AS entity_a,
+            c2.company_name AS entity_b,
+            c3.company_name AS entity_c,
+            t1.amount AS initial_amount,
+            t3.amount AS return_amount
+        FROM transaction_ledgers t1
+        JOIN transaction_ledgers t2 ON t1.receiver_id = t2.sender_id
+        JOIN transaction_ledgers t3 ON t2.receiver_id = t3.sender_id
+        JOIN corporate_entities c1 ON t1.sender_id = c1.id
+        JOIN corporate_entities c2 ON t1.receiver_id = c2.id
+        JOIN corporate_entities c3 ON t2.receiver_id = c3.id
+        WHERE t3.receiver_id = t1.sender_id
+        AND t1.amount > 10000;
+    """)
+
+    try:
+        result = db.execute(sql_query).mappings().all()
+        
+        if not result:
+            return {"status": "clean", "message": "No circular trading detected."}
+            
+        return {
+            "status": "threat_detected", 
+            "alert": "Circular Trading Loop Identified",
+            "evidence": [dict(row) for row in result]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/aml/detect-circular-trading")
+def detect_circular_trading(db: Session = Depends(get_db)):
+    """
+    Executes a 3-way Self-Join combined with entity lookups to detect closed-loop transactions.
+    """
+    sql_query = text("""
+        SELECT 
+            c1.company_name AS entity_a,
+            c2.company_name AS entity_b,
+            c3.company_name AS entity_c,
+            t1.amount AS initial_amount,
+            t3.amount AS return_amount
+        FROM transaction_ledgers t1
+        JOIN transaction_ledgers t2 ON t1.receiver_id = t2.sender_id
+        JOIN transaction_ledgers t3 ON t2.receiver_id = t3.sender_id
+        JOIN corporate_entities c1 ON t1.sender_id = c1.id
+        JOIN corporate_entities c2 ON t1.receiver_id = c2.id
+        JOIN corporate_entities c3 ON t2.receiver_id = c3.id
+        WHERE t3.receiver_id = t1.sender_id
+        AND t1.amount > 10000;
+    """)
+
+    try:
+        result = db.execute(sql_query).mappings().all()
+        
+        if not result:
+            return {"status": "clean", "message": "No circular trading detected across transaction ledgers."}
+            
+        return {
+            "status": "threat_detected", 
+            "alert": "Circular Trading Loop Identified",
+            "evidence": [dict(row) for row in result]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def health_check():
