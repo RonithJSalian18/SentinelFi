@@ -11,6 +11,7 @@ import {
   RefreshCw,
   ArrowRight,
   Network,
+  MessageSquare,
 } from "lucide-react";
 
 interface RiskAnalysis {
@@ -54,6 +55,11 @@ export default function Dashboard() {
   const [amlResults, setAmlResults] = useState<AMLResponse | null>(null);
   const [amlStatusNote, setAmlStatusNote] = useState("");
 
+  // Chat State
+  const [chatQuery, setChatQuery] = useState("");
+  const [chatAnswer, setChatAnswer] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) {
@@ -83,6 +89,33 @@ export default function Dashboard() {
       );
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!file || !chatQuery) return;
+
+    setChatLoading(true);
+    setChatAnswer("");
+
+    const formData = new FormData();
+    formData.append("file", file); // Send the same file currently in state
+    formData.append("query", chatQuery);
+
+    try {
+      const response = await axios.post(
+        "http://127.0.0.1:8000/chat-document",
+        formData,
+        {
+          headers: { "Content-Type": "multipart/form-data" },
+        },
+      );
+      setChatAnswer(response.data.answer);
+    } catch (err: any) {
+      setChatAnswer("Error analyzing document. Please try again.");
+    } finally {
+      setChatLoading(false);
     }
   };
 
@@ -395,6 +428,37 @@ export default function Dashboard() {
                         ),
                       )}
                     </ul>
+                  </div>
+
+                  {/* Interactive Document Q&A */}
+                  <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm mt-6 space-y-4">
+                    <div className="flex items-center space-x-2 text-indigo-600">
+                      <MessageSquare className="w-5 h-5" />
+                      <h4 className="font-semibold text-slate-900">
+                        Ask the AI (Document Q&A)
+                      </h4>
+                    </div>
+                    <form onSubmit={handleChat} className="flex space-x-3">
+                      <input
+                        type="text"
+                        value={chatQuery}
+                        onChange={(e) => setChatQuery(e.target.value)}
+                        placeholder="e.g., Who is the CEO? Are there any offshore accounts?"
+                        className="flex-1 px-4 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <button
+                        type="submit"
+                        disabled={chatLoading || !chatQuery}
+                        className="px-5 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+                      >
+                        {chatLoading ? "Searching..." : "Ask"}
+                      </button>
+                    </form>
+                    {chatAnswer && (
+                      <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
+                        {chatAnswer}
+                      </div>
+                    )}
                   </div>
                 </div>
               </>

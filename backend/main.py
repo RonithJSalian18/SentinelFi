@@ -295,3 +295,48 @@ async def analyze_document(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat-document")
+async def chat_with_document(
+    query: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """Allows users to ask specific questions about the uploaded compliance PDF."""
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    try:
+        content = await file.read()
+        pdf_reader = PdfReader(io.BytesIO(content))
+
+        extracted_text = ""
+        for page in pdf_reader.pages:
+            extracted_text += page.extract_text() or ""
+
+        if not extracted_text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text.")
+
+        # Instruct GenAI to act as a focused QA assistant
+        prompt = f"""
+        You are an expert financial compliance AI.
+        Read the following corporate document and answer the user's question accurately.
+        If the answer is not in the text, clearly state "Information not found in document."
+
+        Document Text:
+        {extracted_text}
+
+        User Question: {query}
+        """
+
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+
+        return {
+            "status": "success",
+            "answer": response.text
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
