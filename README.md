@@ -13,6 +13,7 @@
 [![Google Gemini](https://img.shields.io/badge/AI%20Engine-Gemini%202.5%20Flash-4285F4.svg?style=flat-square&logo=google&logoColor=white)](https://ai.google.dev/)
 [![Celery](https://img.shields.io/badge/Task%20Queue-Celery%20%2B%20Redis-37814A.svg?style=flat-square&logo=celery&logoColor=white)](https://docs.celeryq.dev/)
 [![C++](https://img.shields.io/badge/AML%20Engine-C%2B%2B17%20%2B%20pybind11-00599C.svg?style=flat-square&logo=cplusplus&logoColor=white)](https://pybind11.readthedocs.io/)
+[![AWS S3](https://img.shields.io/badge/Storage-AWS%20S3-FF9900.svg?style=flat-square&logo=amazons3&logoColor=white)](https://aws.amazon.com/s3/)
 [![Security](https://img.shields.io/badge/Security-Zero--Trust%20Shield-critical.svg?style=flat-square&logo=shield)](https://github.com/RonithJSalian18/SentinelFi)
 
 ---
@@ -24,8 +25,9 @@ Corporate onboarding (Know Your Business - KYB) and continuous Anti-Money Launde
 **SentinelFi** delivers an autonomous compliance suite that:
 1. **Parses & Evaluates Corporate Filings**: Automatically extracts entity details, ESG vulnerabilities, and hidden legal liabilities from PDFs using Gemini 2.5 Flash with deterministic JSON schema validation — processed asynchronously by Celery workers with real-time WebSocket notifications.
 2. **Surveils Transaction Ledgers for Circular AML Loops**: Detects multi-party round-trip transactions ($A \to B \to \dots \to A$, up to 8 entities) with a multi-threaded C++ graph engine bound to Python via pybind11.
-3. **Interactively Interrogates Documents**: Empowers analysts to perform conversational due diligence on corporate PDFs with verified document grounding.
-4. **Protects Enterprise Infrastructure**: Enforces an active **Zero-Trust Security Shield** directly in the ASGI middleware pipeline, blocking SQL Injection and XSS attacks while applying strict HSTS and security headers.
+3. **Retains Original Filings for Audit**: Streams every uploaded PDF into encrypted AWS S3 storage with a SHA-256 fingerprint, and renders it in an embedded viewer through short-lived pre-signed URLs.
+4. **Interactively Interrogates Documents**: Empowers analysts to perform conversational due diligence on corporate PDFs with verified document grounding.
+5. **Protects Enterprise Infrastructure**: Enforces an active **Zero-Trust Security Shield** directly in the ASGI middleware pipeline, blocking SQL Injection and XSS attacks while applying strict HSTS and security headers.
 
 ---
 
@@ -65,12 +67,18 @@ flowchart TD
         Jobs["document_jobs"]
     end
 
+    subgraph Storage ["Document Retention Layer"]
+        S3[("AWS S3\n(SSE encrypted, versioned)")]
+    end
+
     UI -->|"HTTP / REST (CORS restricted)"| Shield
     UI <-->|"WebSocket: live job status"| WS
     Shield -->|"Sanitized Payloads"| Router
+    Router -->|"Stream PDF + SHA-256"| S3
     Router -->|"202 Accepted + job_id"| Jobs
     Router -->|"Enqueue"| Redis
     Redis --> Worker
+    S3 -->|"Fetch original"| Worker
     Worker --> PDFParser
     PDFParser --> AIEngine
     AIEngine -->|"Structured Risk Scores & Registry Data"| Entities
@@ -82,6 +90,7 @@ flowchart TD
     Postgres --- Owners
     Postgres --- Ledgers
     Postgres --- Jobs
+    UI -.->|"Pre-signed URL (embedded viewer)"| S3
 ```
 
 ---
@@ -127,11 +136,21 @@ A 3-way SQL self-join only finds loops of exactly three entities, and its cost e
 | 20k entities / 100k transactions | 2–4 hops | **9.5 ms** | 2,717 ms (287× slower) |
 | 5M entities / 10M transactions | 2–6 hops | **~14 s** | impractical |
 
-### 3. 💬 Interactive Due Diligence Assistant (Document Q&A)
+### 3. 🗄️ Document Retention & Embedded Viewer (AWS S3)
+- **Secure ingestion**: Each upload is validated (PDF magic bytes, size limit), fingerprinted with SHA-256, and streamed to S3 under `kyc-documents/YYYY/MM/<job_id>/<filename>` with **server-side encryption** (SSE-S3 by default, SSE-KMS via `S3_KMS_KEY_ID`) and an S3-verified SHA-256 checksum.
+- **Queue carries ids, not files**: Celery workers fetch the original from S3 by key, so PDFs never pass through Redis.
+- **Audit linkage**: The object key and fingerprint are stored on `document_jobs` and the latest filing's key on `corporate_entities.document_key`.
+- **Pre-signed URLs on demand**: The database stores object *keys*, not URLs. Pre-signed URLs expire (default 15 min), so a fresh one is generated every time an analyst opens a document (`GET /documents/{job_id}/url`).
+- **Embedded PDF viewer**: The dashboard renders the original filing in-page, alongside its fingerprint, plus a **Document Archive** table listing every retained filing.
+- **Archive-backed Q&A**: Document chat reads the archived copy (`job_id`) instead of re-uploading the PDF.
+- **S3-compatible**: Works with MinIO, Cloudflare R2 or LocalStack via `S3_ENDPOINT_URL`.
+- **Zero-infra dev mode**: Without `S3_BUCKET`, files are kept under `backend/storage/` and served through HMAC-signed, expiring links that behave like S3 pre-signed URLs.
+
+### 4. 💬 Interactive Due Diligence Assistant (Document Q&A)
 - Compliance officers can ask direct natural language questions against the uploaded PDF document (e.g., *"Who is the ultimate beneficial owner?", "Are there offshore subsidiaries mentioned?"*).
 - Grounded contextual answers generated with strict compliance-focused system prompts.
 
-### 4. 🛡️ Zero-Trust Security Shield
+### 5. 🛡️ Zero-Trust Security Shield
 - Real-time ASGI middleware inspecting raw queries and URI paths for malicious attack vectors:
   - SQL Injection (`SELECT`, `DROP`, `INSERT`, comments `--`, etc.)
   - Cross-Site Scripting (`<script>`, `<img onerror=...`)
@@ -153,6 +172,7 @@ A 3-way SQL self-join only finds loops of exactly three entities, and its cost e
 | **AI / LLM** | [Google Gemini 2.5 Flash](https://ai.google.dev/) via `google-genai` SDK (Structured JSON output schema) |
 | **Document Processing** | [PyPDF](https://pypdf.readthedocs.io/) |
 | **AML Graph Engine** | C++17, [pybind11](https://pybind11.readthedocs.io/), [NumPy](https://numpy.org/) |
+| **Object Storage** | [AWS S3](https://aws.amazon.com/s3/) via [boto3](https://boto3.amazonaws.com/) (MinIO for local Docker) |
 | **Database & ORM** | [PostgreSQL](https://www.postgresql.org/), [SQLAlchemy 2.0](https://www.sqlalchemy.org/), [psycopg2-binary](https://pypi.org/project/psycopg2-binary/) |
 | **DevOps & Containers** | [Docker](https://www.docker.com/), Docker Compose |
 
@@ -169,6 +189,7 @@ sentinelfi/
 │   ├── tasks.py                # Celery app & async document analysis pipeline
 │   ├── notifier.py             # Job status fan-out (Redis pub/sub or in-process)
 │   ├── document_ai.py          # PDF text extraction & Gemini prompts
+│   ├── storage.py              # S3 / local document retention & pre-signed URLs
 │   ├── setup.py                # Builds the native C++ AML engine (pybind11)
 │   ├── aml_engine/
 │   │   ├── cpp/cycle_detector.hpp  # C++ cycle detection core (SCC + pruned parallel DFS)
@@ -188,7 +209,7 @@ sentinelfi/
 │   ├── package.json            # Frontend package scripts & dependencies
 │   ├── tsconfig.json           # TypeScript configuration
 │   └── next.config.ts          # Next.js configuration
-├── docker-compose.yml          # Redis + API + Celery worker stack
+├── docker-compose.yml          # Redis + MinIO + API + Celery worker stack
 ├── .gitignore
 └── README.md
 ```
@@ -238,6 +259,11 @@ Ensure you have the following installed:
    GEMINI_API_KEY=your_gemini_api_key_here
    # Optional: enable the Celery task queue
    # REDIS_URL=redis://localhost:6379/0
+   # Optional: archive documents in S3 (otherwise stored in backend/storage/)
+   # S3_BUCKET=sentinelfi-kyc-documents
+   # AWS_REGION=us-east-1
+   # AWS_ACCESS_KEY_ID=...
+   # AWS_SECRET_ACCESS_KEY=...
    ```
 
 5. **Start the FastAPI backend server**:
@@ -300,7 +326,10 @@ Ensure you have the following installed:
 | `POST` | `/analyze-document` | Queues a PDF for async KYB risk analysis; returns `202` + `job_id` | `file`: PDF binary, `bank_name`: string |
 | `GET` | `/jobs/{job_id}` | Job status & analysis result | `job_id`: path |
 | `WS` | `/ws/jobs/{job_id}` | Live push of job status until `completed` / `failed` | `job_id`: path |
-| `POST` | `/chat-document` | Grounded conversational Q&A on PDF | `file`: PDF binary, `query`: string |
+| `GET` | `/documents` | Audit archive of retained filings | `limit` (1-100) |
+| `GET` | `/documents/{job_id}/url` | Short-lived pre-signed URL for the original PDF | `job_id`: path |
+| `GET` | `/documents/{job_id}/file` | Serves a locally archived PDF (local mode only) | `expires`, `signature` |
+| `POST` | `/chat-document` | Grounded conversational Q&A on PDF | `query` + either `job_id` (archived document) or `file` |
 | `POST` | `/aml/seed-dummy-data` | Seeds a test circular trading loop | None |
 | `GET` | `/aml/detect-circular-trading`| Detects round-tripping loops with the graph engine | `max_hops` (2-8), `min_amount`, `chronological`, `window_days`, `max_results` |
 | `GET` | `/aml/engine` | Reports the active engine (`cpp` or `python`) | None |
@@ -319,9 +348,37 @@ Ensure you have the following installed:
 
 ---
 
+## ☁️ Configuring AWS S3
+
+1. **Create a private bucket** with *Block all public access* enabled, and turn on **Versioning** so an overwritten or deleted filing can always be recovered:
+   ```bash
+   aws s3api create-bucket --bucket sentinelfi-kyc-documents --region us-east-1
+   aws s3api put-public-access-block --bucket sentinelfi-kyc-documents \
+     --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+   aws s3api put-bucket-versioning --bucket sentinelfi-kyc-documents --versioning-configuration Status=Enabled
+   ```
+   For regulated retention (for example, 5-year AML record keeping), create the bucket with **S3 Object Lock** in compliance mode instead.
+
+2. **Grant the API least-privilege access**. It only needs to write and read document objects:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["s3:PutObject", "s3:GetObject"],
+       "Resource": "arn:aws:s3:::sentinelfi-kyc-documents/kyc-documents/*"
+     }]
+   }
+   ```
+   Add `kms:GenerateDataKey` and `kms:Decrypt` on your key if you set `S3_KMS_KEY_ID`.
+
+3. **Set the variables** in `backend/.env`: `S3_BUCKET`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (or use an IAM role when deployed on AWS).
+
+---
+
 ## 🐳 Running with Docker
 
-Run the full async stack (API + Celery worker + Redis) with Docker Compose — PostgreSQL and the Gemini key are read from `backend/.env`:
+Run the full stack (API + Celery worker + Redis + MinIO as a local S3) with Docker Compose. PostgreSQL and the Gemini key are read from `backend/.env`; the MinIO console is at `http://localhost:9001`:
 
 ```bash
 docker compose up --build
@@ -347,7 +404,8 @@ docker run -d -p 8000:8000 \
 
 - **Zero-Trust Request Inspection**: Every incoming query string is unquoted and matched against injection patterns prior to application processing.
 - **Enterprise Headers**: Mitigates MIME-sniffing, framing (clickjacking), and insecure protocol downgrade via strict HSTS headers.
-- **Data Isolation**: CORS policies configured specifically for permitted frontend origins (`http://localhost:3000`).
+- **Data Isolation**: CORS policies configured specifically for permitted frontend origins (`CORS_ORIGINS`, default `http://localhost:3000`).
+- **Document Confidentiality**: Filings are encrypted at rest in a private bucket and only reachable through pre-signed URLs that expire after 15 minutes; only the PDF route may be framed, and only by the dashboard origin (`frame-ancestors`).
 
 ---
 

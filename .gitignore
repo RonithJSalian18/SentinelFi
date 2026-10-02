@@ -17,3 +17,8 @@ build/
 *.egg-info/
 *.pyd
 *.so
+
+.vscode/
+
+# Local document archive (used when S3 is not configured)
+backend/storage/

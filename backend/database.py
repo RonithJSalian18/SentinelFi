@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
@@ -26,3 +26,21 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def sync_schema():
+    """
+    Create missing tables, then add any new nullable columns to existing ones.
+    create_all() never alters an existing table, so without this, new model columns
+    would be missing from databases created by earlier versions.
+    """
+    Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing or not column.nullable:
+                    continue
+                column_type = column.type.compile(dialect=engine.dialect)
+                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'))

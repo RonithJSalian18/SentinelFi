@@ -1,12 +1,12 @@
 """
-Asynchronous document analysis pipeline.
+Asynchronous document analysis pipeline. The uploaded PDF is read back from object storage
+(see storage.py), so only the job id travels through the queue.
 
 Production:   REDIS_URL is set -> jobs are queued in Redis and processed by Celery workers:
                   celery -A tasks worker --loglevel=info            (Linux / Docker)
                   celery -A tasks worker --loglevel=info --pool=solo (Windows)
 Local dev:    REDIS_URL unset  -> jobs run in FastAPI BackgroundTasks inside the API process.
 """
-import base64
 import logging
 from datetime import datetime, timezone
 
@@ -18,13 +18,14 @@ import models
 import notifier
 from database import SessionLocal
 from document_ai import analyze_risk, extract_pdf_text
+from storage import load_document
 
 logger = logging.getLogger("sentinelfi.tasks")
 
 TERMINAL_STATUSES = {"completed", "failed"}
 
 
-def _upsert_entity(db, analysis: dict, filename: str) -> models.CorporateEntity:
+def _upsert_entity(db, analysis: dict, filename: str, document_key: str) -> models.CorporateEntity:
     reg_num = analysis.get("registration_number") or "UNKNOWN"
     if reg_num.upper() == "UNKNOWN":
         # Keep unidentified filings apart instead of collapsing them into one "UNKNOWN" record
@@ -36,12 +37,14 @@ def _upsert_entity(db, analysis: dict, filename: str) -> models.CorporateEntity:
 
     if entity:
         entity.ai_risk_score = analysis.get("overall_risk_score", 0.0)
+        entity.document_key = document_key
     else:
         entity = models.CorporateEntity(
             company_name=analysis.get("company_name", "Unknown Company"),
             registration_number=reg_num,
             country_of_incorporation=analysis.get("country_of_incorporation", "Unknown"),
-            ai_risk_score=analysis.get("overall_risk_score", 0.0)
+            ai_risk_score=analysis.get("overall_risk_score", 0.0),
+            document_key=document_key,
         )
         db.add(entity)
     db.flush()
@@ -58,7 +61,7 @@ def _set_status(db, job: models.DocumentJob, status: str, **fields) -> None:
     notifier.publish(job.id, job.to_payload())
 
 
-def run_analysis_job(job_id: str, pdf_bytes: bytes) -> None:
+def run_analysis_job(job_id: str) -> None:
     """Extract, analyze and persist one uploaded PDF, broadcasting each status change."""
     db = SessionLocal()
     try:
@@ -70,14 +73,14 @@ def run_analysis_job(job_id: str, pdf_bytes: bytes) -> None:
         _set_status(db, job, "processing")
 
         try:
-            extracted_text = extract_pdf_text(pdf_bytes)
+            extracted_text = extract_pdf_text(load_document(job.document_key))
             if not extracted_text.strip():
                 raise ValueError("Could not extract text from the PDF.")
 
             analysis = analyze_risk(extracted_text, job.bank_name)
 
             try:
-                entity = _upsert_entity(db, analysis, job.filename)
+                entity = _upsert_entity(db, analysis, job.filename, job.document_key)
                 entity_id = entity.id
             except IntegrityError:
                 db.rollback()
@@ -105,12 +108,12 @@ if celery_app is not None:
     )
 
     @celery_app.task(name="sentinelfi.analyze_document")
-    def analyze_document_task(job_id: str, pdf_b64: str) -> None:
-        run_analysis_job(job_id, base64.b64decode(pdf_b64))
+    def analyze_document_task(job_id: str) -> None:
+        run_analysis_job(job_id)
 
 
-def enqueue_analysis(job_id: str, pdf_bytes: bytes, background_tasks: BackgroundTasks) -> None:
+def enqueue_analysis(job_id: str, background_tasks: BackgroundTasks) -> None:
     if celery_app is not None:
-        analyze_document_task.delay(job_id, base64.b64encode(pdf_bytes).decode("ascii"))
+        analyze_document_task.delay(job_id)
     else:
-        background_tasks.add_task(run_analysis_job, job_id, pdf_bytes)
+        background_tasks.add_task(run_analysis_job, job_id)

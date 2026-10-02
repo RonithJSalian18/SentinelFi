@@ -1,6 +1,9 @@
 import os
 import re
 import urllib.parse
+import uuid
+from functools import partial
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
@@ -8,23 +11,25 @@ load_dotenv()
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, BackgroundTasks, WebSocket, WebSocketDisconnect, Query
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from database import engine, Base, get_db, SessionLocal
+from database import get_db, SessionLocal, sync_schema
 from document_ai import extract_pdf_text, answer_question
 from tasks import enqueue_analysis, TERMINAL_STATUSES
 from aml_engine import ENGINE as AML_ENGINE
 from aml_engine.scanner import scan_circular_trading, ScanOptions
 import models
 import notifier
+import storage
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
-# Create PostgreSQL tables on startup
-models.Base.metadata.create_all(bind=engine)
+# Create PostgreSQL tables (and any newly added columns) on startup
+sync_schema()
 
 # Known malicious patterns (SQL Injection & XSS)
 SUSPICIOUS_PATTERNS = [
@@ -43,7 +48,7 @@ app = FastAPI(
 # 2. CORS MIDDLEWARE
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -74,7 +79,11 @@ async def zero_trust_security_shield(request: Request, call_next):
 
     # Inject enterprise security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    if path.startswith("/documents/") and path.endswith("/file"):
+        # Stored PDFs may be framed by the dashboard's embedded viewer, and nothing else
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'self' " + " ".join(CORS_ORIGINS)
+    else:
+        response.headers["X-Frame-Options"] = "DENY"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
     return response
@@ -173,19 +182,36 @@ async def analyze_document(
     bank_name: str = Form("a Tier-1 Global Bank"),
     db: Session = Depends(get_db)
 ):
-    """Queues a PDF for background risk analysis and returns immediately with a job id."""
-    if not file.filename.endswith(".pdf"):
+    """Archives the PDF in object storage, queues it for background risk analysis and
+    returns immediately with a job id."""
+    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"PDF exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    if not content.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="File is not a valid PDF document.")
 
-    job = models.DocumentJob(filename=file.filename, bank_name=bank_name, status="queued")
+    job_id = str(uuid.uuid4())
+    try:
+        stored = await run_in_threadpool(storage.store_document, job_id, file.filename, content, bank_name)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not archive document: {e}")
+
+    job = models.DocumentJob(
+        id=job_id,
+        filename=file.filename,
+        bank_name=bank_name,
+        status="queued",
+        document_key=stored.key,
+        document_sha256=stored.sha256,
+        document_size=stored.size,
+    )
     db.add(job)
     db.commit()
 
-    enqueue_analysis(job.id, content, background_tasks)
+    enqueue_analysis(job.id, background_tasks)
 
     return {
         **job.to_payload(),
@@ -233,17 +259,86 @@ async def job_updates(websocket: WebSocket, job_id: str):
     except WebSocketDisconnect:
         pass
 
+@app.get("/documents")
+def list_documents(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
+    """Audit archive: the most recently submitted documents and their analysis outcome."""
+    jobs = (
+        db.query(models.DocumentJob)
+        .order_by(models.DocumentJob.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "job_id": job.id,
+            "filename": job.filename,
+            "tenant": job.bank_name,
+            "status": job.status,
+            "risk_score": (job.result or {}).get("overall_risk_score"),
+            "company_name": (job.result or {}).get("company_name"),
+            "document_available": job.document_key is not None,
+            "document_sha256": job.document_sha256,
+            "size_bytes": job.document_size,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+        }
+        for job in jobs
+    ]
+
+def _archived_job(db: Session, job_id: str) -> models.DocumentJob:
+    job = db.get(models.DocumentJob, job_id)
+    if job is None or job.document_key is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return job
+
+@app.get("/documents/{job_id}/url")
+def get_document_url(job_id: str, request: Request, db: Session = Depends(get_db)):
+    """Returns a short-lived URL for viewing the original PDF (S3 pre-signed URL in production)."""
+    job = _archived_job(db, job_id)
+    local_file_url = str(request.url_for("download_document", job_id=job_id))
+    return {
+        "url": storage.document_url(job.id, job.document_key, job.filename, local_file_url),
+        "expires_in": storage.PRESIGNED_URL_TTL,
+        "storage": storage.get_storage().name,
+        "filename": job.filename,
+        "sha256": job.document_sha256,
+    }
+
+@app.get("/documents/{job_id}/file", name="download_document")
+def download_document(job_id: str, expires: int, signature: str, db: Session = Depends(get_db)):
+    """Serves a locally stored PDF when the request carries a valid, unexpired signature."""
+    if not storage.verify_local_signature(job_id, expires, signature):
+        raise HTTPException(status_code=403, detail="Document link is invalid or has expired.")
+    job = _archived_job(db, job_id)
+    store = storage.get_storage()
+    if not isinstance(store, storage.LocalStorage):
+        raise HTTPException(status_code=404, detail="Documents are served directly from object storage.")
+    return FileResponse(
+        store.path(job.document_key),
+        media_type="application/pdf",
+        content_disposition_type="inline",
+        filename=storage.safe_filename(job.filename),
+    )
+
 @app.post("/chat-document")
 async def chat_with_document(
     query: str = Form(...),
-    file: UploadFile = File(...)
+    file: Optional[UploadFile] = File(None),
+    job_id: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
 ):
-    """Allows users to ask specific questions about the uploaded compliance PDF."""
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    """Answers questions about a compliance PDF: either an archived document (job_id) or a fresh upload."""
+    if job_id:
+        job = _archived_job(db, job_id)
+        load = partial(storage.load_document, job.document_key)
+    elif file is not None:
+        if not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+        load = None
+    else:
+        raise HTTPException(status_code=400, detail="Provide either a job_id or a PDF file.")
 
     try:
-        content = await file.read()
+        content = await run_in_threadpool(load) if load else await file.read()
         extracted_text = extract_pdf_text(content)
 
         if not extracted_text.strip():

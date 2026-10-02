@@ -13,6 +13,7 @@ class CorporateEntity(Base):
     registration_number = Column(String, unique=True, index=True, nullable=False)
     country_of_incorporation = Column(String)
     ai_risk_score = Column(Float, default=0.0)
+    document_key = Column(String)  # object-store key of the latest source filing
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
@@ -50,6 +51,9 @@ class DocumentJob(Base):
     result = Column(JSON)
     error = Column(Text)
     entity_id = Column(Integer, ForeignKey("corporate_entities.id"))
+    document_key = Column(String)       # object-store key of the original PDF
+    document_sha256 = Column(String(64))
+    document_size = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True))
 
@@ -61,4 +65,7 @@ class DocumentJob(Base):
             "tenant": self.bank_name,
             "analysis": self.result,
             "error": self.error,
+            "document_available": self.document_key is not None,
+            "document_sha256": self.document_sha256,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
