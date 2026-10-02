@@ -11,6 +11,7 @@
 [![Tailwind CSS](https://img.shields.io/badge/Styling-Tailwind%20CSS%20v4-38B2AC.svg?style=flat-square&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
 [![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-336791.svg?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Google Gemini](https://img.shields.io/badge/AI%20Engine-Gemini%202.5%20Flash-4285F4.svg?style=flat-square&logo=google&logoColor=white)](https://ai.google.dev/)
+[![Celery](https://img.shields.io/badge/Task%20Queue-Celery%20%2B%20Redis-37814A.svg?style=flat-square&logo=celery&logoColor=white)](https://docs.celeryq.dev/)
 [![Security](https://img.shields.io/badge/Security-Zero--Trust%20Shield-critical.svg?style=flat-square&logo=shield)](https://github.com/RonithJSalian18/SentinelFi)
 
 ---
@@ -20,7 +21,7 @@
 Corporate onboarding (Know Your Business - KYB) and continuous Anti-Money Laundering (AML) monitoring in modern banking are plagued by manual document review, fragmented corporate registries, and sophisticated money laundering schemes such as round-tripping and circular trading.
 
 **SentinelFi** delivers an autonomous compliance suite that:
-1. **Parses & Evaluates Corporate Filings**: Automatically extracts entity details, ESG vulnerabilities, and hidden legal liabilities from PDFs using Gemini 2.5 Flash with deterministic JSON schema validation.
+1. **Parses & Evaluates Corporate Filings**: Automatically extracts entity details, ESG vulnerabilities, and hidden legal liabilities from PDFs using Gemini 2.5 Flash with deterministic JSON schema validation — processed asynchronously by Celery workers with real-time WebSocket notifications.
 2. **Surveils Transaction Ledgers for Circular AML Loops**: Detects multi-party round-trip transactions ($A \to B \to C \to A$) using high-performance relational self-joins.
 3. **Interactively Interrogates Documents**: Empowers analysts to perform conversational due diligence on corporate PDFs with verified document grounding.
 4. **Protects Enterprise Infrastructure**: Enforces an active **Zero-Trust Security Shield** directly in the ASGI middleware pipeline, blocking SQL Injection and XSS attacks while applying strict HSTS and security headers.
@@ -41,8 +42,17 @@ flowchart TD
 
     subgraph Backend ["SentinelFi Core Engine (FastAPI)"]
         Router["API Gateway / Routers"]
+        WS["WebSocket Job Notifier\n(/ws/jobs/{id})"]
+    end
+
+    subgraph Async ["Asynchronous Processing Layer"]
+        Redis[("Redis\n(Broker + Pub/Sub)")]
+        Worker["Celery Worker"]
         PDFParser["PDF Document Extractor\n(PyPDF Stream Reader)"]
         AIEngine["Compliance AI Reasoner\n(Google Gemini 2.5 Flash)"]
+    end
+
+    subgraph Engines ["Detection Engines"]
         AMLEngine["Circular Trading Detection Engine\n(3-Way Relational Self-Join)"]
     end
 
@@ -51,18 +61,26 @@ flowchart TD
         Entities["corporate_entities"]
         Owners["beneficial_owners"]
         Ledgers["transaction_ledgers"]
+        Jobs["document_jobs"]
     end
 
     UI -->|"HTTP / REST (CORS restricted)"| Shield
+    UI <-->|"WebSocket: live job status"| WS
     Shield -->|"Sanitized Payloads"| Router
-    Router --> PDFParser
+    Router -->|"202 Accepted + job_id"| Jobs
+    Router -->|"Enqueue"| Redis
+    Redis --> Worker
+    Worker --> PDFParser
     PDFParser --> AIEngine
     AIEngine -->|"Structured Risk Scores & Registry Data"| Entities
+    Worker -->|"Status events"| Redis
+    Redis -->|"Pub/Sub"| WS
     Router --> AMLEngine
     AMLEngine -->|"Loop Queries & Verification"| Ledgers
     Postgres --- Entities
     Postgres --- Owners
     Postgres --- Ledgers
+    Postgres --- Jobs
 ```
 
 ---
@@ -78,6 +96,13 @@ flowchart TD
   - Financial liabilities, undisclosed debts, and litigation threats
   - Composite Risk Rating ($1 - 100$ scale: Low, Moderate, High)
 - **Automatic Registry Sync**: Auto-creates or updates records in PostgreSQL (`corporate_entities`) with computed risk scores.
+
+### ⚡ Asynchronous Processing Pipeline
+- **Non-blocking uploads**: `POST /analyze-document` returns `202 Accepted` with a `job_id` in milliseconds, no matter how large the filing.
+- **Celery workers**: A background worker pulls the PDF from the Redis queue, runs the GenAI extraction, and persists results to PostgreSQL (`document_jobs` + `corporate_entities`). Jobs are acknowledged late, so a crashed worker's job is re-delivered.
+- **Real-time push**: Workers publish status changes (`queued → processing → completed | failed`) over Redis pub/sub; the API relays them to the dashboard through a WebSocket (`/ws/jobs/{job_id}`), which raises an **"Analysis Complete"** notification.
+- **Resilient client**: If the WebSocket drops, the dashboard falls back to polling `GET /jobs/{job_id}`.
+- **Zero-infra dev mode**: With `REDIS_URL` unset, jobs run in-process through FastAPI `BackgroundTasks` using the same pipeline.
 
 ### 2. 🕸️ Graph AML Surveillance: Circular Trading Engine
 - **Round-Tripping & Layering Detection**: Detects closed-loop money laundering flows where capital cycles through intermediary shell companies ($Entity_A \to Entity_B \to Entity_C \to Entity_A$).
@@ -105,11 +130,12 @@ flowchart TD
 | Layer | Technologies |
 | :--- | :--- |
 | **Frontend** | [Next.js 16](https://nextjs.org/) (App Router), [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Tailwind CSS v4](https://tailwindcss.com/), [Lucide React](https://lucide.dev/), [Axios](https://axios-http.com/) |
-| **Backend API** | [FastAPI](https://fastapi.tiangolo.com/) (Python 3.10+), [Uvicorn](https://www.uvicorn.org/), Starlette Middleware |
+| **Backend API** | [FastAPI](https://fastapi.tiangolo.com/) (Python 3.10+), [Uvicorn](https://www.uvicorn.org/), Starlette Middleware, WebSockets |
+| **Task Queue** | [Celery](https://docs.celeryq.dev/), [Redis](https://redis.io/) (broker + pub/sub) |
 | **AI / LLM** | [Google Gemini 2.5 Flash](https://ai.google.dev/) via `google-genai` SDK (Structured JSON output schema) |
 | **Document Processing** | [PyPDF](https://pypdf.readthedocs.io/) |
 | **Database & ORM** | [PostgreSQL](https://www.postgresql.org/), [SQLAlchemy 2.0](https://www.sqlalchemy.org/), [psycopg2-binary](https://pypi.org/project/psycopg2-binary/) |
-| **DevOps & Containers** | [Docker](https://www.docker.com/) |
+| **DevOps & Containers** | [Docker](https://www.docker.com/), Docker Compose |
 
 ---
 
@@ -120,11 +146,15 @@ sentinelfi/
 ├── backend/
 │   ├── database.py             # Database engine & session dependency (pool_pre_ping)
 │   ├── models.py               # SQLAlchemy models (Entities, Owners, Ledgers)
-│   ├── main.py                 # FastAPI application, routes & Zero-Trust Shield
+│   ├── main.py                 # FastAPI application, routes, WebSocket & Zero-Trust Shield
+│   ├── tasks.py                # Celery app & async document analysis pipeline
+│   ├── notifier.py             # Job status fan-out (Redis pub/sub or in-process)
+│   ├── document_ai.py          # PDF text extraction & Gemini prompts
 │   ├── requirements.txt        # Backend dependencies
 │   ├── Dockerfile              # Docker container configuration
 │   └── .env.example            # Backend environment variables template
 ├── frontend/
+│   ├── lib/api.ts              # API/WebSocket base URLs & error helpers
 │   ├── app/
 │   │   ├── layout.tsx          # Root Next.js layout
 │   │   ├── page.tsx            # SentinelFi compliance dashboard & AML visualizer
@@ -132,6 +162,7 @@ sentinelfi/
 │   ├── package.json            # Frontend package scripts & dependencies
 │   ├── tsconfig.json           # TypeScript configuration
 │   └── next.config.ts          # Next.js configuration
+├── docker-compose.yml          # Redis + API + Celery worker stack
 ├── .gitignore
 └── README.md
 ```
@@ -179,6 +210,8 @@ Ensure you have the following installed:
    ```env
    DATABASE_URL=postgresql://postgres:password@localhost:5432/sentinelfi
    GEMINI_API_KEY=your_gemini_api_key_here
+   # Optional: enable the Celery task queue
+   # REDIS_URL=redis://localhost:6379/0
    ```
 
 5. **Start the FastAPI backend server**:
@@ -186,6 +219,15 @@ Ensure you have the following installed:
    uvicorn main:app --reload --host 127.0.0.1 --port 8000
    ```
    The API will be live at `http://127.0.0.1:8000` with interactive Swagger docs at `http://127.0.0.1:8000/docs`.
+
+6. **(Optional) Start a Celery worker** — only when `REDIS_URL` is set. Without it, documents are processed in-process by FastAPI `BackgroundTasks`.
+   ```bash
+   # Linux / macOS
+   celery -A tasks worker --loglevel=info
+   # Windows (prefork is unsupported)
+   celery -A tasks worker --loglevel=info --pool=solo
+   ```
+   Need a Redis instance? Run `docker run -p 6379:6379 redis:7-alpine`, use [Memurai](https://www.memurai.com/) on Windows, or a free cloud Redis such as [Upstash](https://upstash.com/).
 
 ---
 
@@ -201,12 +243,17 @@ Ensure you have the following installed:
    npm install
    ```
 
-3. **Run the Next.js development server**:
+3. **(Optional) Point at a non-local API** by creating `frontend/.env.local`:
+   ```env
+   NEXT_PUBLIC_API_URL=https://your-api.example.com
+   ```
+
+4. **Run the Next.js development server**:
    ```bash
    npm run dev
    ```
 
-4. **Access the Dashboard**:
+5. **Access the Dashboard**:
    Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
@@ -217,7 +264,9 @@ Ensure you have the following installed:
 | :--- | :--- | :--- | :--- |
 | `GET` | `/` | Health Check | None |
 | `GET` | `/db-health` | PostgreSQL connectivity probe | None |
-| `POST` | `/analyze-document` | PDF KYB Risk Analysis & database registration | `file`: PDF binary, `bank_name`: string |
+| `POST` | `/analyze-document` | Queues a PDF for async KYB risk analysis; returns `202` + `job_id` | `file`: PDF binary, `bank_name`: string |
+| `GET` | `/jobs/{job_id}` | Job status & analysis result | `job_id`: path |
+| `WS` | `/ws/jobs/{job_id}` | Live push of job status until `completed` / `failed` | `job_id`: path |
 | `POST` | `/chat-document` | Grounded conversational Q&A on PDF | `file`: PDF binary, `query`: string |
 | `POST` | `/aml/seed-dummy-data` | Seeds a test circular trading loop | None |
 | `GET` | `/aml/detect-circular-trading`| Detects round-tripping loops across ledgers | None |
@@ -236,7 +285,13 @@ Ensure you have the following installed:
 
 ## 🐳 Running with Docker
 
-You can containerize the SentinelFi backend using the included Dockerfile:
+Run the full async stack (API + Celery worker + Redis) with Docker Compose — PostgreSQL and the Gemini key are read from `backend/.env`:
+
+```bash
+docker compose up --build
+```
+
+Or containerize the SentinelFi backend using the included Dockerfile:
 
 ```bash
 # Build the Docker image

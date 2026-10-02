@@ -6,3 +6,5 @@ python-dotenv>=1.0.0
 google-genai>=0.1.0
 pypdf>=5.0.0
 python-multipart>=0.0.9
+celery[redis]>=5.4.0
+redis>=5.0.1

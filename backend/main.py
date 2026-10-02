@@ -1,27 +1,24 @@
 import os
-import io
-import json
 import re
 import urllib.parse
 from dotenv import load_dotenv
-from pypdf import PdfReader
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
+load_dotenv()
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from google import genai
-from sqlalchemy.exc import IntegrityError
-from google.genai import types
 
-from database import engine, Base, get_db
+from database import engine, Base, get_db, SessionLocal
+from document_ai import extract_pdf_text, answer_question
+from tasks import enqueue_analysis, TERMINAL_STATUSES
 import models
+import notifier
 
-load_dotenv()
-
-# Initialize Gemini Client
-ai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
 
 # Create PostgreSQL tables on startup
 models.Base.metadata.create_all(bind=engine)
@@ -199,102 +196,72 @@ def check_db_health(db: Session = Depends(get_db)):
     except Exception as e:
         return {"status": "error", "message": f"Database connection failed: {str(e)}"}
 
-@app.post("/analyze-document")
+@app.post("/analyze-document", status_code=202)
 async def analyze_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     bank_name: str = Form("a Tier-1 Global Bank"),
-    db: Session = Depends(get_db) # 1. Inject the database session here
+    db: Session = Depends(get_db)
 ):
+    """Queues a PDF for background risk analysis and returns immediately with a job id."""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"PDF exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+
+    job = models.DocumentJob(filename=file.filename, bank_name=bank_name, status="queued")
+    db.add(job)
+    db.commit()
+
+    enqueue_analysis(job.id, content, background_tasks)
+
+    return {
+        **job.to_payload(),
+        "message": "Processing... connect to the WebSocket for live status.",
+        "websocket": f"/ws/jobs/{job.id}",
+    }
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(models.DocumentJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job.to_payload()
+
+def _job_snapshot(job_id: str):
+    db = SessionLocal()
     try:
-        content = await file.read()
-        pdf_reader = PdfReader(io.BytesIO(content))
+        job = db.get(models.DocumentJob, job_id)
+        return job.to_payload() if job else None
+    finally:
+        db.close()
 
-        extracted_text = ""
-        for page in pdf_reader.pages:
-            extracted_text += page.extract_text() or ""
+@app.websocket("/ws/jobs/{job_id}")
+async def job_updates(websocket: WebSocket, job_id: str):
+    """Pushes live status for one analysis job until it completes or fails."""
+    await websocket.accept()
+    try:
+        # Subscribe before reading the current state so no update can slip through the gap
+        async with notifier.subscribe(job_id) as next_event:
+            snapshot = await run_in_threadpool(_job_snapshot, job_id)
+            if snapshot is None:
+                await websocket.send_json({"job_id": job_id, "status": "not_found"})
+                await websocket.close(code=4404)
+                return
+            await websocket.send_json(snapshot)
 
-        if not extracted_text.strip():
-            raise HTTPException(status_code=400, detail="Could not extract text from the PDF.")
-
-        prompt = f"""
-        You are an expert Chief Compliance Officer operating on behalf of {bank_name}.
-        Your objective is to protect {bank_name} from regulatory fines and corporate fraud.
-
-        Analyze the following corporate document text and extract the key risks, along with the company's legal identity.
-
-        Document Text:
-        {extracted_text}
-        """
-
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema={
-                    "type": "OBJECT",
-                    "properties": {
-                        "company_name": {"type": "STRING", "description": "The legal name of the company."},
-                        "registration_number": {"type": "STRING", "description": "The corporate registration number (or 'UNKNOWN' if missing)."},
-                        "country_of_incorporation": {"type": "STRING", "description": "The country where the company is registered."},
-                        "esg_risks": {
-                            "type": "ARRAY",
-                            "items": {"type": "STRING"},
-                            "description": "Top 3 Environmental, Social, or Governance risks."
-                        },
-                        "financial_liabilities": {
-                            "type": "ARRAY",
-                            "items": {"type": "STRING"},
-                            "description": "Any hidden debts, lawsuits, or financial red flags."
-                        },
-                        "overall_risk_score": {
-                            "type": "INTEGER",
-                            "description": "A risk score from 1 to 100 based on the findings."
-                        }
-                    }
-                }
-            )
-        )
-
-        analysis_data = json.loads(response.text)
-
-        # 2. Save to PostgreSQL Database
-        try:
-            # Check if this company already exists in our database
-            reg_num = analysis_data.get("registration_number", f"UNKNOWN-{file.filename}")
-            existing_entity = db.query(models.CorporateEntity).filter(models.CorporateEntity.registration_number == reg_num).first()
-
-            if existing_entity:
-                # Update the existing record with the new risk score
-                existing_entity.ai_risk_score = analysis_data.get("overall_risk_score", 0.0)
-            else:
-                # Create a brand new record
-                new_entity = models.CorporateEntity(
-                    company_name=analysis_data.get("company_name", "Unknown Company"),
-                    registration_number=reg_num,
-                    country_of_incorporation=analysis_data.get("country_of_incorporation", "Unknown"),
-                    ai_risk_score=analysis_data.get("overall_risk_score", 0.0)
-                )
-                db.add(new_entity)
-            
-            db.commit()
-            
-        except IntegrityError:
-            db.rollback()
-            logger.warning(f"Database integrity error while saving {file.filename}")
-
-        return {
-            "status": "success",
-            "tenant": bank_name,
-            "filename": file.filename,
-            "analysis": analysis_data
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            while snapshot["status"] not in TERMINAL_STATUSES:
+                event = await next_event(30)
+                # On timeout, fall back to the database in case an event was missed
+                latest = event or await run_in_threadpool(_job_snapshot, job_id)
+                if latest and latest["status"] != snapshot["status"]:
+                    snapshot = latest
+                    await websocket.send_json(snapshot)
+        await websocket.close()
+    except WebSocketDisconnect:
+        pass
 
 @app.post("/chat-document")
 async def chat_with_document(
@@ -307,36 +274,17 @@ async def chat_with_document(
 
     try:
         content = await file.read()
-        pdf_reader = PdfReader(io.BytesIO(content))
-
-        extracted_text = ""
-        for page in pdf_reader.pages:
-            extracted_text += page.extract_text() or ""
+        extracted_text = extract_pdf_text(content)
 
         if not extracted_text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text.")
 
-        # Instruct GenAI to act as a focused QA assistant
-        prompt = f"""
-        You are an expert financial compliance AI.
-        Read the following corporate document and answer the user's question accurately.
-        If the answer is not in the text, clearly state "Information not found in document."
-
-        Document Text:
-        {extracted_text}
-
-        User Question: {query}
-        """
-
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-
         return {
             "status": "success",
-            "answer": response.text
+            "answer": answer_question(extracted_text, query)
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

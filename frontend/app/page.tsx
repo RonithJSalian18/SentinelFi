@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
+import { API_BASE, WS_BASE, errorDetail } from "@/lib/api";
 import {
   ShieldAlert,
   UploadCloud,
@@ -12,6 +13,7 @@ import {
   ArrowRight,
   Network,
   MessageSquare,
+  X,
 } from "lucide-react";
 
 interface RiskAnalysis {
@@ -26,6 +28,18 @@ interface AnalysisResponse {
   filename: string;
   analysis: RiskAnalysis;
 }
+
+interface JobUpdate {
+  job_id: string;
+  status: "queued" | "processing" | "completed" | "failed" | "not_found";
+  filename: string;
+  tenant: string;
+  analysis: RiskAnalysis | null;
+  error: string | null;
+}
+
+const JOB_POLL_INTERVAL_MS = 2000;
+const JOB_POLL_MAX_ATTEMPTS = 300;
 
 interface AMLEvidence {
   entity_a: string;
@@ -49,6 +63,9 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<AnalysisResponse | null>(null);
   const [error, setError] = useState("");
+  const [jobStatus, setJobStatus] = useState<JobUpdate["status"] | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
 
   // AML State
   const [amlLoading, setAmlLoading] = useState(false);
@@ -60,6 +77,67 @@ export default function Dashboard() {
   const [chatAnswer, setChatAnswer] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
 
+  useEffect(() => () => socketRef.current?.close(), []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  // Follow a background analysis job: live WebSocket push, with HTTP polling as a fallback
+  const watchJob = (jobId: string) => {
+    let settled = false;
+
+    const handleUpdate = (update: JobUpdate) => {
+      if (settled) return;
+      if (update.status === "queued" || update.status === "processing") {
+        setJobStatus(update.status);
+        return;
+      }
+      settled = true;
+      setLoading(false);
+      setJobStatus(null);
+      if (update.status === "completed" && update.analysis) {
+        setResults({
+          status: "success",
+          tenant: update.tenant,
+          filename: update.filename,
+          analysis: update.analysis,
+        });
+        setToast(`Analysis Complete: ${update.filename}`);
+      } else {
+        setError(update.error || "Document analysis failed.");
+      }
+    };
+
+    const pollFallback = async () => {
+      for (let i = 0; i < JOB_POLL_MAX_ATTEMPTS && !settled; i++) {
+        await new Promise((r) => setTimeout(r, JOB_POLL_INTERVAL_MS));
+        try {
+          const { data } = await axios.get<JobUpdate>(`${API_BASE}/jobs/${jobId}`);
+          handleUpdate(data);
+        } catch {
+          // transient network error: keep polling
+        }
+      }
+      if (!settled) {
+        settled = true;
+        setLoading(false);
+        setJobStatus(null);
+        setError("Timed out waiting for the analysis to finish.");
+      }
+    };
+
+    socketRef.current?.close();
+    const socket = new WebSocket(`${WS_BASE}/ws/jobs/${jobId}`);
+    socketRef.current = socket;
+    socket.onmessage = (event) => handleUpdate(JSON.parse(event.data));
+    socket.onclose = () => {
+      if (!settled) pollFallback();
+    };
+  };
+
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) {
@@ -70,24 +148,24 @@ export default function Dashboard() {
     setLoading(true);
     setError("");
     setResults(null);
+    setChatAnswer("");
 
     const formData = new FormData();
     formData.append("file", file);
     formData.append("bank_name", bankName);
 
     try {
-      const response = await axios.post<AnalysisResponse>(
-        "http://127.0.0.1:8000/analyze-document",
+      const response = await axios.post<JobUpdate>(
+        `${API_BASE}/analyze-document`,
         formData,
         { headers: { "Content-Type": "multipart/form-data" } },
       );
-      setResults(response.data);
-    } catch (err: any) {
+      setJobStatus(response.data.status);
+      watchJob(response.data.job_id);
+    } catch (err) {
       setError(
-        err.response?.data?.detail ||
-          "An error occurred during compliance verification.",
+        errorDetail(err, "An error occurred during compliance verification."),
       );
-    } finally {
       setLoading(false);
     }
   };
@@ -105,14 +183,14 @@ export default function Dashboard() {
 
     try {
       const response = await axios.post(
-        "http://127.0.0.1:8000/chat-document",
+        `${API_BASE}/chat-document`,
         formData,
         {
           headers: { "Content-Type": "multipart/form-data" },
         },
       );
       setChatAnswer(response.data.answer);
-    } catch (err: any) {
+    } catch {
       setChatAnswer("Error analyzing document. Please try again.");
     } finally {
       setChatLoading(false);
@@ -124,13 +202,11 @@ export default function Dashboard() {
     setAmlStatusNote("");
     try {
       const response = await axios.get<AMLResponse>(
-        "http://127.0.0.1:8000/aml/detect-circular-trading",
+        `${API_BASE}/aml/detect-circular-trading`,
       );
       setAmlResults(response.data);
-    } catch (err: any) {
-      setAmlStatusNote(
-        err.response?.data?.detail || "Failed to scan transaction ledger.",
-      );
+    } catch (err) {
+      setAmlStatusNote(errorDetail(err, "Failed to scan transaction ledger."));
     } finally {
       setAmlLoading(false);
     }
@@ -139,10 +215,10 @@ export default function Dashboard() {
   const seedDummyData = async () => {
     setAmlLoading(true);
     try {
-      await axios.post("http://127.0.0.1:8000/aml/seed-dummy-data");
+      await axios.post(`${API_BASE}/aml/seed-dummy-data`);
       setAmlStatusNote("Simulated ledger seeded successfully. Run scan now.");
       await runAMLScan();
-    } catch (err: any) {
+    } catch {
       setAmlStatusNote("Failed to seed dummy AML ledger.");
     } finally {
       setAmlLoading(false);
@@ -151,6 +227,22 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-6 md:p-10 font-sans">
+      {toast && (
+        <div
+          role="status"
+          className="fixed top-6 right-6 z-50 flex items-center space-x-3 bg-white border border-emerald-200 shadow-lg rounded-xl px-4 py-3"
+        >
+          <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+          <span className="text-sm font-medium text-slate-800">{toast}</span>
+          <button
+            onClick={() => setToast(null)}
+            aria-label="Dismiss notification"
+            className="text-slate-400 hover:text-slate-600"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
       <div className="max-w-6xl mx-auto space-y-8">
         {/* Header */}
         <header className="flex flex-wrap items-center justify-between pb-6 border-b border-slate-200 gap-4">
@@ -257,20 +349,12 @@ export default function Dashboard() {
                           Transfer Vol:{" "}
                           <strong className="text-slate-800">
                             $
-                            {(
-                              loop.initial_amount ||
-                              loop.initial_transfer ||
-                              0
-                            ).toLocaleString()}
+                            {loop.initial_amount.toLocaleString()}
                           </strong>{" "}
                           → Return:{" "}
                           <strong className="text-slate-800">
                             $
-                            {(
-                              loop.return_amount ||
-                              loop.return_transfer ||
-                              0
-                            ).toLocaleString()}
+                            {loop.return_amount.toLocaleString()}
                           </strong>
                         </div>
                       </div>
@@ -336,9 +420,26 @@ export default function Dashboard() {
                 disabled={loading}
                 className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg shadow-sm transition disabled:opacity-50"
               >
-                {loading ? "Running Risk Engine..." : "Analyze Document"}
+                {!loading
+                  ? "Analyze Document"
+                  : jobStatus === "processing"
+                    ? "Processing..."
+                    : jobStatus === "queued"
+                      ? "Queued..."
+                      : "Uploading..."}
               </button>
             </form>
+
+            {jobStatus && (
+              <div className="flex items-start space-x-2 p-3 text-xs bg-blue-50 border border-blue-100 text-blue-800 rounded-lg">
+                <RefreshCw className="w-3.5 h-3.5 mt-0.5 animate-spin shrink-0" />
+                <span>
+                  {jobStatus === "queued"
+                    ? "Document received and queued for analysis."
+                    : "AI risk analysis running in the background. You will be notified when it completes."}
+                </span>
+              </div>
+            )}
 
             {error && (
               <div className="p-3 text-xs bg-rose-50 border border-rose-200 text-rose-700 rounded-lg">

@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+import uuid
+
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -35,3 +37,28 @@ class TransactionLedger(Base):
     amount = Column(Float, nullable=False)
     currency = Column(String, default="USD")
     transaction_date = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentJob(Base):
+    """Tracks an asynchronous document analysis from upload to completion."""
+    __tablename__ = "document_jobs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    filename = Column(String, nullable=False)
+    bank_name = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued", index=True)  # queued | processing | completed | failed
+    result = Column(JSON)
+    error = Column(Text)
+    entity_id = Column(Integer, ForeignKey("corporate_entities.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True))
+
+    def to_payload(self) -> dict:
+        return {
+            "job_id": self.id,
+            "status": self.status,
+            "filename": self.filename,
+            "tenant": self.bank_name,
+            "analysis": self.result,
+            "error": self.error,
+        }
