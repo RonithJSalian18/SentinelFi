@@ -41,12 +41,32 @@ interface JobUpdate {
 const JOB_POLL_INTERVAL_MS = 2000;
 const JOB_POLL_MAX_ATTEMPTS = 300;
 
+interface AMLTransaction {
+  transaction_id: number;
+  sender: string;
+  receiver: string;
+  amount: number;
+  timestamp: number;
+}
+
 interface AMLEvidence {
-  entity_a: string;
-  entity_b: string;
-  entity_c: string;
+  path: string[];
+  hops: number;
   initial_amount: number;
   return_amount: number;
+  retention_pct: number;
+  total_volume: number;
+  transactions: AMLTransaction[];
+}
+
+interface AMLStats {
+  engine: "cpp" | "python";
+  transactions_scanned: number;
+  entities_in_graph: number;
+  cycles_found: number;
+  truncated: boolean;
+  load_ms: number;
+  scan_ms: number;
 }
 
 interface AMLResponse {
@@ -54,6 +74,7 @@ interface AMLResponse {
   alert?: string;
   message?: string;
   evidence?: AMLEvidence[];
+  stats?: AMLStats;
 }
 
 export default function Dashboard() {
@@ -71,6 +92,8 @@ export default function Dashboard() {
   const [amlLoading, setAmlLoading] = useState(false);
   const [amlResults, setAmlResults] = useState<AMLResponse | null>(null);
   const [amlStatusNote, setAmlStatusNote] = useState("");
+  const [maxHops, setMaxHops] = useState(4);
+  const [chronological, setChronological] = useState(false);
 
   // Chat State
   const [chatQuery, setChatQuery] = useState("");
@@ -203,6 +226,7 @@ export default function Dashboard() {
     try {
       const response = await axios.get<AMLResponse>(
         `${API_BASE}/aml/detect-circular-trading`,
+        { params: { max_hops: maxHops, chronological } },
       );
       setAmlResults(response.data);
     } catch (err) {
@@ -279,18 +303,46 @@ export default function Dashboard() {
                   AML Graph Surveillance: Circular Trading Engine
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Runs 3-way self-joins across transaction ledgers to unmask
-                  round-tripping & money-laundering loops.
+                  In-memory C++ graph engine that unmasks round-tripping &
+                  money-laundering loops of up to 8 entities.
                 </p>
               </div>
             </div>
-            <div className="flex items-center space-x-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center space-x-1.5 text-xs text-slate-600">
+                <span>Max hops</span>
+                <select
+                  value={maxHops}
+                  onChange={(e) => setMaxHops(Number(e.target.value))}
+                  disabled={amlLoading}
+                  className="px-2 py-1.5 border border-slate-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  {[2, 3, 4, 5, 6, 7, 8].map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label
+                className="flex items-center space-x-1.5 text-xs text-slate-600"
+                title="Only flag loops where each transfer happens after the previous one"
+              >
+                <input
+                  type="checkbox"
+                  checked={chronological}
+                  onChange={(e) => setChronological(e.target.checked)}
+                  disabled={amlLoading}
+                  className="accent-indigo-600"
+                />
+                <span>Chronological</span>
+              </label>
               <button
                 onClick={seedDummyData}
                 disabled={amlLoading}
                 className="text-xs px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-lg transition disabled:opacity-50"
               >
-                Seed Test Loop
+                Seed Test Loops
               </button>
               <button
                 onClick={runAMLScan}
@@ -314,6 +366,42 @@ export default function Dashboard() {
           )}
 
           {/* AML Scan Output */}
+          {amlResults?.stats && (
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+              <span>
+                Engine:{" "}
+                <strong className="text-slate-700">
+                  {amlResults.stats.engine === "cpp"
+                    ? "Native C++ (pybind11)"
+                    : "Python fallback"}
+                </strong>
+              </span>
+              <span>
+                Transactions scanned:{" "}
+                <strong className="text-slate-700">
+                  {amlResults.stats.transactions_scanned.toLocaleString()}
+                </strong>
+              </span>
+              <span>
+                Entities in graph:{" "}
+                <strong className="text-slate-700">
+                  {amlResults.stats.entities_in_graph.toLocaleString()}
+                </strong>
+              </span>
+              <span>
+                Graph scan:{" "}
+                <strong className="text-slate-700">
+                  {amlResults.stats.scan_ms.toFixed(1)} ms
+                </strong>
+              </span>
+              {amlResults.stats.truncated && (
+                <span className="text-amber-700">
+                  Results truncated: showing first{" "}
+                  {amlResults.stats.cycles_found.toLocaleString()} loops
+                </span>
+              )}
+            </div>
+          )}
           {amlResults && (
             <div className="pt-2">
               {amlResults.status === "threat_detected" ? (
@@ -329,24 +417,27 @@ export default function Dashboard() {
                         className="bg-white border border-rose-100 p-3 rounded-lg flex flex-wrap items-center justify-between text-xs gap-3"
                       >
                         <div className="flex items-center flex-wrap gap-2 font-mono font-medium text-slate-800">
-                          <span className="px-2.5 py-1 bg-rose-100 text-rose-800 rounded">
-                            {loop.entity_a}
-                          </span>
-                          <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
-                          <span className="px-2.5 py-1 bg-amber-100 text-amber-800 rounded">
-                            {loop.entity_b}
-                          </span>
-                          <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
-                          <span className="px-2.5 py-1 bg-amber-100 text-amber-800 rounded">
-                            {loop.entity_c}
-                          </span>
-                          <ArrowRight className="w-3.5 h-3.5 text-rose-500" />
-                          <span className="px-2.5 py-1 bg-rose-100 text-rose-800 rounded">
-                            {loop.entity_a}
-                          </span>
+                          {[...loop.path, loop.path[0]].map((entity, i) => (
+                            <React.Fragment key={i}>
+                              {i > 0 && (
+                                <ArrowRight
+                                  className={`w-3.5 h-3.5 ${i === loop.path.length ? "text-rose-500" : "text-slate-400"}`}
+                                />
+                              )}
+                              <span
+                                className={`px-2.5 py-1 rounded ${
+                                  i === 0 || i === loop.path.length
+                                    ? "bg-rose-100 text-rose-800"
+                                    : "bg-amber-100 text-amber-800"
+                                }`}
+                              >
+                                {entity}
+                              </span>
+                            </React.Fragment>
+                          ))}
                         </div>
                         <div className="text-slate-500 font-sans">
-                          Transfer Vol:{" "}
+                          {loop.hops} hops · Transfer Vol:{" "}
                           <strong className="text-slate-800">
                             $
                             {loop.initial_amount.toLocaleString()}
@@ -355,7 +446,8 @@ export default function Dashboard() {
                           <strong className="text-slate-800">
                             $
                             {loop.return_amount.toLocaleString()}
-                          </strong>
+                          </strong>{" "}
+                          ({loop.retention_pct}% returned)
                         </div>
                       </div>
                     ))}

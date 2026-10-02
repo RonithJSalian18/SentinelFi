@@ -1,11 +1,12 @@
 import os
 import re
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, BackgroundTasks, WebSocket, WebSocketDisconnect, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,8 @@ from sqlalchemy import text
 from database import engine, Base, get_db, SessionLocal
 from document_ai import extract_pdf_text, answer_question
 from tasks import enqueue_analysis, TERMINAL_STATUSES
+from aml_engine import ENGINE as AML_ENGINE
+from aml_engine.scanner import scan_circular_trading, ScanOptions
 import models
 import notifier
 
@@ -78,111 +81,78 @@ async def zero_trust_security_shield(request: Request, call_next):
 
 
 # --- API ROUTES ---
+SEED_LOOPS = [
+    # (companies as (name, registration number), amounts per hop): each forms a closed loop
+    ([("Alpha Holdings", "AH-001"), ("Beta Logistics", "BL-002"), ("Gamma Consulting", "GC-003")],
+     [500000, 495000, 490000]),
+    ([("Delta Capital", "DC-004"), ("Epsilon Trading", "ET-005"), ("Zeta Imports", "ZI-006"), ("Eta Ventures", "EV-007")],
+     [1200000, 1180000, 1165000, 1150000]),
+]
+
 @app.post("/aml/seed-dummy-data")
 def seed_aml_data(db: Session = Depends(get_db)):
-    """Creates a circular trading loop for testing, ensuring no duplicates."""
+    """Creates a 3-hop and a 4-hop circular trading loop for testing, ensuring no duplicates."""
     try:
-        # 1. Check if the dummy data is already in the database
-        existing_company = db.query(models.CorporateEntity).filter(
-            models.CorporateEntity.registration_number == "AH-001"
-        ).first()
-        
-        if existing_company:
+        created = 0
+        for companies, amounts in SEED_LOOPS:
+            if db.query(models.CorporateEntity).filter(
+                models.CorporateEntity.registration_number == companies[0][1]
+            ).first():
+                continue
+
+            entities = [models.CorporateEntity(company_name=name, registration_number=reg) for name, reg in companies]
+            db.add_all(entities)
+            db.flush()
+
+            # One hop per day, so the loop is also caught by chronological scans
+            start = datetime.now(timezone.utc) - timedelta(days=len(entities))
+            db.add_all([
+                models.TransactionLedger(
+                    sender_id=entities[i].id,
+                    receiver_id=entities[(i + 1) % len(entities)].id,
+                    amount=amount,
+                    transaction_date=start + timedelta(days=i),
+                )
+                for i, amount in enumerate(amounts)
+            ])
+            created += 1
+
+        db.commit()
+        if not created:
             return {"status": "success", "message": "Dummy ledger already seeded. Ready to scan."}
+        return {"status": "success", "message": f"{created} dummy money laundering loop(s) created."}
 
-        # 2. Create 3 Shell Companies
-        co_a = models.CorporateEntity(company_name="Alpha Holdings", registration_number="AH-001")
-        co_b = models.CorporateEntity(company_name="Beta Logistics", registration_number="BL-002")
-        co_c = models.CorporateEntity(company_name="Gamma Consulting", registration_number="GC-003")
-        
-        db.add_all([co_a, co_b, co_c])
-        db.commit()
-
-        # 3. Create the Money Laundering Loop (A -> B -> C -> A)
-        t1 = models.TransactionLedger(sender_id=co_a.id, receiver_id=co_b.id, amount=500000)
-        t2 = models.TransactionLedger(sender_id=co_b.id, receiver_id=co_c.id, amount=495000)
-        t3 = models.TransactionLedger(sender_id=co_c.id, receiver_id=co_a.id, amount=490000)
-        
-        db.add_all([t1, t2, t3])
-        db.commit()
-        
-        return {"status": "success", "message": "Dummy money laundering loop created."}
-        
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/aml/detect-circular-trading")
-def detect_circular_trading(db: Session = Depends(get_db)):
+def detect_circular_trading(
+    max_hops: int = Query(4, ge=2, le=8, description="Longest loop to search for"),
+    min_amount: float = Query(10000, ge=0, description="Ignore transfers below this amount"),
+    window_days: int = Query(0, ge=0, le=3650, description="Max days between first and last hop (0 = unlimited)"),
+    chronological: bool = Query(False, description="Require every hop to follow the previous one in time"),
+    max_results: int = Query(500, ge=1, le=10000),
+    db: Session = Depends(get_db),
+):
     """
-    Executes a 3-way Self-Join combined with entity lookups to detect closed-loop transactions.
+    Loads the ledger into the in-memory AML graph engine (C++ via pybind11, with a pure-Python
+    fallback) and reports every closed money loop of 2..max_hops entities.
     """
-    sql_query = text("""
-        SELECT 
-            c1.company_name AS entity_a,
-            c2.company_name AS entity_b,
-            c3.company_name AS entity_c,
-            t1.amount AS initial_amount,
-            t3.amount AS return_amount
-        FROM transaction_ledgers t1
-        JOIN transaction_ledgers t2 ON t1.receiver_id = t2.sender_id
-        JOIN transaction_ledgers t3 ON t2.receiver_id = t3.sender_id
-        JOIN corporate_entities c1 ON t1.sender_id = c1.id
-        JOIN corporate_entities c2 ON t1.receiver_id = c2.id
-        JOIN corporate_entities c3 ON t2.receiver_id = c3.id
-        WHERE t3.receiver_id = t1.sender_id
-        AND t1.amount > 10000;
-    """)
-
     try:
-        result = db.execute(sql_query).mappings().all()
-        
-        if not result:
-            return {"status": "clean", "message": "No circular trading detected."}
-            
-        return {
-            "status": "threat_detected", 
-            "alert": "Circular Trading Loop Identified",
-            "evidence": [dict(row) for row in result]
-        }
+        return scan_circular_trading(db, ScanOptions(
+            max_hops=max_hops,
+            min_amount=min_amount,
+            window_days=window_days,
+            chronological=chronological,
+            max_results=max_results,
+        ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/aml/detect-circular-trading")
-def detect_circular_trading(db: Session = Depends(get_db)):
-    """
-    Executes a 3-way Self-Join combined with entity lookups to detect closed-loop transactions.
-    """
-    sql_query = text("""
-        SELECT 
-            c1.company_name AS entity_a,
-            c2.company_name AS entity_b,
-            c3.company_name AS entity_c,
-            t1.amount AS initial_amount,
-            t3.amount AS return_amount
-        FROM transaction_ledgers t1
-        JOIN transaction_ledgers t2 ON t1.receiver_id = t2.sender_id
-        JOIN transaction_ledgers t3 ON t2.receiver_id = t3.sender_id
-        JOIN corporate_entities c1 ON t1.sender_id = c1.id
-        JOIN corporate_entities c2 ON t1.receiver_id = c2.id
-        JOIN corporate_entities c3 ON t2.receiver_id = c3.id
-        WHERE t3.receiver_id = t1.sender_id
-        AND t1.amount > 10000;
-    """)
-
-    try:
-        result = db.execute(sql_query).mappings().all()
-        
-        if not result:
-            return {"status": "clean", "message": "No circular trading detected across transaction ledgers."}
-            
-        return {
-            "status": "threat_detected", 
-            "alert": "Circular Trading Loop Identified",
-            "evidence": [dict(row) for row in result]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/aml/engine")
+def aml_engine_info():
+    return {"engine": AML_ENGINE, "native": AML_ENGINE == "cpp"}
 
 @app.get("/")
 def health_check():

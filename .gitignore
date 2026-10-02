@@ -12,3 +12,8 @@ node_modules/
 
 # OS files
 .DS_Store
+# Native extension build artifacts
+build/
+*.egg-info/
+*.pyd
+*.so

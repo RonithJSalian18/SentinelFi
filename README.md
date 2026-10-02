@@ -12,6 +12,7 @@
 [![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-336791.svg?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Google Gemini](https://img.shields.io/badge/AI%20Engine-Gemini%202.5%20Flash-4285F4.svg?style=flat-square&logo=google&logoColor=white)](https://ai.google.dev/)
 [![Celery](https://img.shields.io/badge/Task%20Queue-Celery%20%2B%20Redis-37814A.svg?style=flat-square&logo=celery&logoColor=white)](https://docs.celeryq.dev/)
+[![C++](https://img.shields.io/badge/AML%20Engine-C%2B%2B17%20%2B%20pybind11-00599C.svg?style=flat-square&logo=cplusplus&logoColor=white)](https://pybind11.readthedocs.io/)
 [![Security](https://img.shields.io/badge/Security-Zero--Trust%20Shield-critical.svg?style=flat-square&logo=shield)](https://github.com/RonithJSalian18/SentinelFi)
 
 ---
@@ -22,7 +23,7 @@ Corporate onboarding (Know Your Business - KYB) and continuous Anti-Money Launde
 
 **SentinelFi** delivers an autonomous compliance suite that:
 1. **Parses & Evaluates Corporate Filings**: Automatically extracts entity details, ESG vulnerabilities, and hidden legal liabilities from PDFs using Gemini 2.5 Flash with deterministic JSON schema validation — processed asynchronously by Celery workers with real-time WebSocket notifications.
-2. **Surveils Transaction Ledgers for Circular AML Loops**: Detects multi-party round-trip transactions ($A \to B \to C \to A$) using high-performance relational self-joins.
+2. **Surveils Transaction Ledgers for Circular AML Loops**: Detects multi-party round-trip transactions ($A \to B \to \dots \to A$, up to 8 entities) with a multi-threaded C++ graph engine bound to Python via pybind11.
 3. **Interactively Interrogates Documents**: Empowers analysts to perform conversational due diligence on corporate PDFs with verified document grounding.
 4. **Protects Enterprise Infrastructure**: Enforces an active **Zero-Trust Security Shield** directly in the ASGI middleware pipeline, blocking SQL Injection and XSS attacks while applying strict HSTS and security headers.
 
@@ -53,7 +54,7 @@ flowchart TD
     end
 
     subgraph Engines ["Detection Engines"]
-        AMLEngine["Circular Trading Detection Engine\n(3-Way Relational Self-Join)"]
+        AMLEngine["AML Graph Engine\n(C++17 + pybind11, SCC-pruned parallel DFS)"]
     end
 
     subgraph Data ["Data & Storage Layer"]
@@ -104,10 +105,27 @@ flowchart TD
 - **Resilient client**: If the WebSocket drops, the dashboard falls back to polling `GET /jobs/{job_id}`.
 - **Zero-infra dev mode**: With `REDIS_URL` unset, jobs run in-process through FastAPI `BackgroundTasks` using the same pipeline.
 
-### 2. 🕸️ Graph AML Surveillance: Circular Trading Engine
-- **Round-Tripping & Layering Detection**: Detects closed-loop money laundering flows where capital cycles through intermediary shell companies ($Entity_A \to Entity_B \to Entity_C \to Entity_A$).
-- **SQL Self-Join Analysis**: Performs an optimized 3-way join on `transaction_ledgers` cross-referenced with `corporate_entities` for transactions exceeding configured thresholds.
-- **Simulation Sandbox**: One-click test seeding (`/aml/seed-dummy-data`) to simulate and audit shell company loops.
+### 2. 🕸️ High-Frequency AML Graph Engine
+A 3-way SQL self-join only finds loops of exactly three entities, and its cost explodes on large ledgers. SentinelFi instead streams the ledger into an in-memory graph and runs a dedicated C++ algorithm:
+
+- **Native C++17 core** ([`aml_engine/cpp/cycle_detector.hpp`](backend/aml_engine/cpp/cycle_detector.hpp)), exposed to FastAPI through **pybind11** with zero-copy NumPy buffers and the GIL released during the scan.
+- **Algorithm**:
+  1. **CSR adjacency** built by counting sort in $O(V + E)$.
+  2. **Tarjan SCC decomposition** (iterative): a loop can never leave its strongly connected component, so every inter-component transfer is discarded up front.
+  3. **Depth-bounded DFS** enumerating every simple loop of 2..8 hops, reporting each loop exactly once.
+  4. **Meet-in-the-middle pruning**: a reverse BFS of radius ⌊hops/2⌋ marks which entities can still route money back to the start, so dead-end branches are cut early.
+  5. **Multi-threaded**: start nodes are processed in chunks across all CPU cores; results are merged deterministically.
+- **Forensic options**: `max_hops`, `min_amount`, `chronological` (each hop must follow the previous one in time), and `window_days` (whole loop must complete within N days).
+- **Evidence trail**: every loop returns the ordered entity path, each underlying transaction, total volume and the **retention %** (how much of the original sum came back).
+- **Pure-Python fallback** with identical semantics, used automatically when the extension isn't compiled; randomized parity testing (12,000 graph/option combinations) confirms both engines return identical results.
+- **Simulation Sandbox**: One-click test seeding (`/aml/seed-dummy-data`) creates a 3-hop and a 4-hop shell-company loop.
+
+**Benchmark** (`python -m aml_engine.benchmark`, laptop Intel i5-13420H, 12 threads):
+
+| Ledger | Loop length | C++ engine | Python engine |
+| :--- | :--- | ---: | ---: |
+| 20k entities / 100k transactions | 2–4 hops | **9.5 ms** | 2,717 ms (287× slower) |
+| 5M entities / 10M transactions | 2–6 hops | **~14 s** | impractical |
 
 ### 3. 💬 Interactive Due Diligence Assistant (Document Q&A)
 - Compliance officers can ask direct natural language questions against the uploaded PDF document (e.g., *"Who is the ultimate beneficial owner?", "Are there offshore subsidiaries mentioned?"*).
@@ -134,6 +152,7 @@ flowchart TD
 | **Task Queue** | [Celery](https://docs.celeryq.dev/), [Redis](https://redis.io/) (broker + pub/sub) |
 | **AI / LLM** | [Google Gemini 2.5 Flash](https://ai.google.dev/) via `google-genai` SDK (Structured JSON output schema) |
 | **Document Processing** | [PyPDF](https://pypdf.readthedocs.io/) |
+| **AML Graph Engine** | C++17, [pybind11](https://pybind11.readthedocs.io/), [NumPy](https://numpy.org/) |
 | **Database & ORM** | [PostgreSQL](https://www.postgresql.org/), [SQLAlchemy 2.0](https://www.sqlalchemy.org/), [psycopg2-binary](https://pypi.org/project/psycopg2-binary/) |
 | **DevOps & Containers** | [Docker](https://www.docker.com/), Docker Compose |
 
@@ -150,6 +169,13 @@ sentinelfi/
 │   ├── tasks.py                # Celery app & async document analysis pipeline
 │   ├── notifier.py             # Job status fan-out (Redis pub/sub or in-process)
 │   ├── document_ai.py          # PDF text extraction & Gemini prompts
+│   ├── setup.py                # Builds the native C++ AML engine (pybind11)
+│   ├── aml_engine/
+│   │   ├── cpp/cycle_detector.hpp  # C++ cycle detection core (SCC + pruned parallel DFS)
+│   │   ├── cpp/bindings.cpp        # pybind11 bridge
+│   │   ├── python_engine.py        # Pure-Python fallback (identical semantics)
+│   │   ├── scanner.py              # Ledger loading & evidence hydration
+│   │   └── benchmark.py            # C++ vs Python benchmark
 │   ├── requirements.txt        # Backend dependencies
 │   ├── Dockerfile              # Docker container configuration
 │   └── .env.example            # Backend environment variables template
@@ -220,7 +246,14 @@ Ensure you have the following installed:
    ```
    The API will be live at `http://127.0.0.1:8000` with interactive Swagger docs at `http://127.0.0.1:8000/docs`.
 
-6. **(Optional) Start a Celery worker** — only when `REDIS_URL` is set. Without it, documents are processed in-process by FastAPI `BackgroundTasks`.
+6. **(Recommended) Build the native C++ AML engine**:
+   ```bash
+   pip install pybind11 setuptools
+   python setup.py build_ext --inplace
+   ```
+   Requires a C++17 compiler (g++/clang on Linux/macOS; [MSVC Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) on Windows, run from the *x64 Native Tools Command Prompt*). Skip it and the pure-Python engine is used automatically; `GET /aml/engine` reports which one is active.
+
+7. **(Optional) Start a Celery worker** — only when `REDIS_URL` is set. Without it, documents are processed in-process by FastAPI `BackgroundTasks`.
    ```bash
    # Linux / macOS
    celery -A tasks worker --loglevel=info
@@ -269,17 +302,20 @@ Ensure you have the following installed:
 | `WS` | `/ws/jobs/{job_id}` | Live push of job status until `completed` / `failed` | `job_id`: path |
 | `POST` | `/chat-document` | Grounded conversational Q&A on PDF | `file`: PDF binary, `query`: string |
 | `POST` | `/aml/seed-dummy-data` | Seeds a test circular trading loop | None |
-| `GET` | `/aml/detect-circular-trading`| Detects round-tripping loops across ledgers | None |
+| `GET` | `/aml/detect-circular-trading`| Detects round-tripping loops with the graph engine | `max_hops` (2-8), `min_amount`, `chronological`, `window_days`, `max_results` |
+| `GET` | `/aml/engine` | Reports the active engine (`cpp` or `python`) | None |
 
 ---
 
 ## 🧪 Testing the AML Detection Engine
 
 1. In the SentinelFi Dashboard, locate the **AML Graph Surveillance** banner.
-2. Click **"Seed Test Loop"** (or make a `POST /aml/seed-dummy-data` request). This seeds three mock shell entities (`Alpha Holdings`, `Beta Logistics`, `Gamma Consulting`) with a closed transaction loop:
+2. Click **"Seed Test Loops"** (or make a `POST /aml/seed-dummy-data` request). This seeds two closed shell-company loops:
    $$\text{Alpha Holdings } \xrightarrow{\$500,000} \text{Beta Logistics } \xrightarrow{\$495,000} \text{Gamma Consulting } \xrightarrow{\$490,000} \text{Alpha Holdings}$$
-3. Click **"Run AML Scan"**.
-4. The system will detect the loop and render the evidence chain with transfer amounts and returning volumes.
+   $$\text{Delta Capital } \xrightarrow{\$1.2M} \text{Epsilon Trading } \xrightarrow{} \text{Zeta Imports } \xrightarrow{} \text{Eta Ventures } \xrightarrow{\$1.15M} \text{Delta Capital}$$
+3. Choose **Max hops** (set it to 3 and the 4-hop loop disappears) and optionally **Chronological**, then click **"Run AML Scan"**.
+4. The system renders each loop's evidence chain with transfer amounts, retention %, and engine statistics.
+5. Benchmark the engines yourself: `python -m aml_engine.benchmark` (from `backend/`).
 
 ---
 
