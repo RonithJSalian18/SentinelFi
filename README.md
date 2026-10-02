@@ -5,6 +5,7 @@
 
 ---
 
+[![CI/CD](https://github.com/RonithJSalian18/SentinelFi/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/RonithJSalian18/SentinelFi/actions/workflows/ci-cd.yml)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Frontend-Next.js%2016-black.svg?style=flat-square&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![React](https://img.shields.io/badge/UI-React%2019-61DAFB.svg?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
@@ -174,7 +175,8 @@ A 3-way SQL self-join only finds loops of exactly three entities, and its cost e
 | **AML Graph Engine** | C++17, [pybind11](https://pybind11.readthedocs.io/), [NumPy](https://numpy.org/) |
 | **Object Storage** | [AWS S3](https://aws.amazon.com/s3/) via [boto3](https://boto3.amazonaws.com/) (MinIO for local Docker) |
 | **Database & ORM** | [PostgreSQL](https://www.postgresql.org/), [SQLAlchemy 2.0](https://www.sqlalchemy.org/), [psycopg2-binary](https://pypi.org/project/psycopg2-binary/) |
-| **DevOps & Containers** | [Docker](https://www.docker.com/), Docker Compose |
+| **DevOps & Containers** | [Docker](https://www.docker.com/), Docker Compose, [GitHub Actions](https://github.com/features/actions), [Docker Hub](https://hub.docker.com/), [Render](https://render.com/) |
+| **Testing & Quality** | [pytest](https://pytest.org/), pytest-cov, [moto](https://github.com/getmoto/moto) (AWS mocks), [Ruff](https://docs.astral.sh/ruff/), ESLint, Dependabot |
 
 ---
 
@@ -182,6 +184,9 @@ A 3-way SQL self-join only finds loops of exactly three entities, and its cost e
 
 ```text
 sentinelfi/
+├── .github/
+│   ├── workflows/ci-cd.yml     # Test → build → push → deploy pipeline
+│   └── dependabot.yml          # Weekly dependency update PRs
 ├── backend/
 │   ├── database.py             # Database engine & session dependency (pool_pre_ping)
 │   ├── models.py               # SQLAlchemy models (Entities, Owners, Ledgers)
@@ -198,6 +203,9 @@ sentinelfi/
 │   │   ├── scanner.py              # Ledger loading & evidence hydration
 │   │   └── benchmark.py            # C++ vs Python benchmark
 │   ├── requirements.txt        # Backend dependencies
+│   ├── requirements-dev.txt    # Test, lint & build tooling
+│   ├── pyproject.toml          # pytest, coverage & ruff configuration
+│   ├── tests/                  # pytest suite (WAF, async pipeline, S3, WebSocket, AML engine)
 │   ├── Dockerfile              # Docker container configuration
 │   └── .env.example            # Backend environment variables template
 ├── frontend/
@@ -336,6 +344,60 @@ Ensure you have the following installed:
 
 ---
 
+## ✅ Automated Tests
+
+The backend ships with a pytest suite of ~95 tests (≈90% line coverage) that runs without any external services: SQLite replaces PostgreSQL, Gemini is stubbed, S3 and KMS are emulated with moto, and the test config blanks out any Redis/S3/database settings from your local `.env` so tests can never touch real infrastructure.
+
+| Suite | What it proves |
+| :--- | :--- |
+| `test_security_shield.py` | The WAF returns `403` for `DROP TABLE`, `UNION SELECT`, `' OR '1'='1`, `<script>` and encoded variants (in the query *and* the path), blocked requests never reach the database, and security headers are always present |
+| `test_documents.py` | Async upload → archive → analysis → persistence; PDF validation; failure handling; signed/expiring links; S3 encryption (SSE-S3 & KMS), checksums and pre-signed URLs; archive-backed Q&A |
+| `test_websocket.py` | Live `queued → processing → completed` push and per-job isolation |
+| `test_aml_engine.py` | Known-answer graphs for both engines + randomized C++ ⇄ Python parity (multi-threaded, multi-chunk) |
+| `test_aml_api.py` | Seeding, loop detection, `max_hops` / `min_amount` / `chronological` / `window_days`, parameter validation |
+| `test_schema.py` | Upgrading a legacy database adds new columns without losing data |
+
+```bash
+cd backend
+pip install -r requirements.txt -r requirements-dev.txt
+ruff check .
+pytest --cov=.
+```
+
+---
+
+## 🔁 CI/CD Pipeline
+
+Every push and pull request runs [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml):
+
+```mermaid
+flowchart LR
+    Push["git push"] --> Backend["Backend\nruff · build C++ engine · pytest + coverage"]
+    Push --> Frontend["Frontend\neslint · tsc · next build"]
+    Backend --> Docker["Docker\nbuild image · smoke-test container"]
+    Frontend --> Docker
+    Docker -->|"main only"| Hub["Push to Docker Hub\n:latest + :commit-sha"]
+    Hub --> Deploy["Render deploy hook\n(exact image digest)"]
+    Deploy --> Verify["Poll GET / until\nversion == commit sha"]
+```
+
+- **Quality gates**: the native C++ engine must compile (`REQUIRE_NATIVE_ENGINE=1`) and every test must pass before an image is built.
+- **Container smoke test**: the freshly built image is started and probed: health check, baked-in commit version, native `cpp` engine present, WAF blocking `DROP TABLE`, and an end-to-end AML seed + scan.
+- **Immutable deploys**: Render is told to deploy the exact image digest that passed the pipeline; the job then waits until production reports the new commit SHA.
+- **Safe by default**: the push and deploy stages skip themselves until credentials are configured, so pull requests and forks still get full test feedback.
+
+### Enabling Docker Hub publishing and Render deployment
+
+1. **Docker Hub**: create an access token (*Account Settings → Personal access tokens*, read & write). In GitHub, go to *Settings → Secrets and variables → Actions* and add:
+   - Variable `DOCKERHUB_USERNAME`: your Docker Hub username (a variable, not a secret, so the image name can be passed between jobs)
+   - Secret `DOCKERHUB_TOKEN`: the access token
+2. **Render**: push once so the image exists, then create a *Web Service → Deploy an existing image* from `docker.io/<username>/sentinelfi-backend:latest`. Add the backend environment variables (`DATABASE_URL`, `GEMINI_API_KEY`, `CORS_ORIGINS`, and optionally `REDIS_URL`, `S3_*`). Render's `$PORT` is respected automatically.
+3. Copy the service's **Deploy Hook** URL (*Settings → Deploy Hook*) into a GitHub secret `RENDER_DEPLOY_HOOK_URL`.
+4. Optionally add a variable `PRODUCTION_URL` (e.g. `https://sentinelfi-api.onrender.com`) so the pipeline verifies the new version is live.
+5. Deploy the frontend to Vercel (or similar) with `NEXT_PUBLIC_API_URL` pointing at the Render URL, and add the frontend's origin to the backend's `CORS_ORIGINS`.
+
+---
+
 ## 🧪 Testing the AML Detection Engine
 
 1. In the SentinelFi Dashboard, locate the **AML Graph Surveillance** banner.
@@ -390,7 +452,7 @@ Or containerize the SentinelFi backend using the included Dockerfile:
 # Build the Docker image
 docker build -t sentinelfi-backend ./backend
 
-# Run the container with environment variables
+# Run the container with environment variables (runs as a non-root user; honours $PORT)
 docker run -d -p 8000:8000 \
   -e DATABASE_URL="postgresql://user:password@host:5432/dbname" \
   -e GEMINI_API_KEY="your_api_key" \

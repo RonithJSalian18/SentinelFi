@@ -7,3 +7,9 @@ build/
 *.pyd
 *.so
 storage/
+.pytest_cache/
+.coverage
+coverage.xml
+test-results.xml
+tests/
+.ruff_cache/

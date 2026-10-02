@@ -1,0 +1,19 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
+
+[tool.coverage.run]
+omit = ["tests/*", "venv/*", "setup.py", "aml_engine/benchmark.py"]
+
+[tool.ruff]
+extend-exclude = ["venv", "build", "storage"]
+
+[tool.ruff.lint]
+# Pyflakes (undefined names, unused imports, ...) and syntax errors
+select = ["F", "E9"]

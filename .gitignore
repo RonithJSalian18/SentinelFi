@@ -22,3 +22,10 @@ build/
 
 # Local document archive (used when S3 is not configured)
 backend/storage/
+
+# Test & coverage output
+.pytest_cache/
+.coverage
+coverage.xml
+test-results.xml
+htmlcov/

@@ -165,7 +165,7 @@ def aml_engine_info():
 
 @app.get("/")
 def health_check():
-    return {"status": "SentinelFi backend is secure and running."}
+    return {"status": "SentinelFi backend is secure and running.", "version": os.getenv("APP_VERSION", "dev")}
 
 @app.get("/db-health")
 def check_db_health(db: Session = Depends(get_db)):
