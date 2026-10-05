@@ -1,23 +1,51 @@
+# Monthly, grouped dependency updates: at most one PR per ecosystem.
+# Major versions are ignored (they need deliberate migration work, not a drive-by bump).
 version: 2
 updates:
   - package-ecosystem: pip
     directory: /backend
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      backend:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # celery[redis] (via kombu) requires redis<6.5; newer clients can't be installed alongside it
+      - dependency-name: redis
+        versions: [">=6.5"]
 
   - package-ecosystem: npm
     directory: /frontend
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      frontend:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /backend
     schedule:
-      interval: weekly
+      interval: monthly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

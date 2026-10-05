@@ -72,7 +72,8 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
-      - run: npx tsc --noEmit
+      # Route/layout types are generated (gitignored), so create them before type-checking
+      - run: npm run typecheck
       - run: npm run build
 
   docker:
