@@ -192,7 +192,7 @@ A 3-way SQL self-join only finds loops of exactly three entities, and its cost e
 
 | Layer | Technologies |
 | :--- | :--- |
-| **Frontend** | [Next.js 16](https://nextjs.org/) (App Router), [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Tailwind CSS v4](https://tailwindcss.com/), [Lucide React](https://lucide.dev/), [Axios](https://axios-http.com/) |
+| **Frontend** | [Next.js 16](https://nextjs.org/) (App Router), [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Tailwind CSS v4](https://tailwindcss.com/) with light/dark design tokens, [Lucide React](https://lucide.dev/), [Axios](https://axios-http.com/) |
 | **Backend API** | [FastAPI](https://fastapi.tiangolo.com/) (Python 3.10+), [Uvicorn](https://www.uvicorn.org/), Starlette Middleware, WebSockets |
 | **Authentication** | OAuth2 password flow, JWT ([PyJWT](https://pyjwt.readthedocs.io/)), Argon2id ([pwdlib](https://frankie567.github.io/pwdlib/)), [Auth.js](https://authjs.dev/) (NextAuth v5) |
 | **Task Queue** | [Celery](https://docs.celeryq.dev/), [Redis](https://redis.io/) (broker + pub/sub) |
@@ -239,16 +239,20 @@ sentinelfi/
 ├── frontend/
 │   ├── auth.ts                 # Auth.js config (Credentials → FastAPI JWT)
 │   ├── proxy.ts                # Redirects unauthenticated visitors to /login
-│   ├── lib/api.ts              # Authenticated API client, WebSocket base URL & error helpers
 │   ├── app/
-│   │   ├── layout.tsx          # Root Next.js layout
-│   │   ├── page.tsx            # SentinelFi compliance dashboard & AML visualizer
+│   │   ├── layout.tsx          # Root layout, fonts, theme bootstrap
+│   │   ├── globals.css         # Design tokens (light/dark) & Tailwind CSS v4
 │   │   ├── login/page.tsx      # Sign-in page
-│   │   ├── components/UserManagement.tsx  # Admin user management panel
-│   │   ├── api/auth/[...nextauth]/route.ts  # Auth.js route handler
-│   │   └── globals.css         # Global stylesheet & Tailwind CSS imports
+│   │   ├── (console)/          # Authenticated console (shared shell)
+│   │   │   ├── page.tsx        # Overview: KPIs, risk distribution, activity
+│   │   │   ├── documents/      # Intake, live pipeline, results & document Q&A
+│   │   │   ├── archive/        # Searchable audit archive + PDF viewer
+│   │   │   ├── aml/            # AML surveillance (System Admin)
+│   │   │   └── users/          # User management (System Admin)
+│   │   └── api/auth/[...nextauth]/route.ts  # Auth.js route handler
+│   ├── components/             # App shell, UI primitives, risk visuals, viewer, toasts
+│   ├── lib/                    # API client, job tracking, types & formatters
 │   ├── package.json            # Frontend package scripts & dependencies
-│   ├── tsconfig.json           # TypeScript configuration
 │   └── next.config.ts          # Next.js configuration
 ├── docker-compose.yml          # Redis + MinIO + API + Celery worker stack
 ├── .gitignore

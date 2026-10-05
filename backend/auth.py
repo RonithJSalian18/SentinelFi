@@ -182,6 +182,8 @@ class UserOut(BaseModel):
     full_name: str
     role: Role
     is_active: bool
+    created_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

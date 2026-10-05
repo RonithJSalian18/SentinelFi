@@ -1,26 +1,180 @@
 @import "tailwindcss";
 
+/*
+ * SentinelFi design tokens. Components use semantic utilities (bg-surface, text-ink-2,
+ * border-line, bg-brand ...) so light and dark themes swap in one place.
+ * Theme: data-theme="light" | "dark" on <html>, falling back to the OS preference.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --canvas: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+  --surface-3: #e9ecf1;
+  --line: #e4e7ec;
+  --line-strong: #d0d5dd;
+  --ink: #101828;
+  --ink-2: #475467;
+  --ink-3: #8a94a6;
+
+  --brand: #4f46e5;
+  --brand-strong: #4338ca;
+  --brand-soft: #eef2ff;
+  --brand-ink: #3730a3;
+
+  /* Status: fixed hues (mode-invariant marks) + per-mode soft fills and text inks */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --good-soft: #ecfdf3;
+  --good-ink: #067647;
+  --warning-soft: #fffaeb;
+  --warning-ink: #b54708;
+  --critical-soft: #fef3f2;
+  --critical-ink: #b42318;
+  --info-soft: #eff8ff;
+  --info-ink: #175cd3;
+
+  --ring: rgb(79 70 229 / 0.35);
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.05);
+  --shadow-pop: 0 12px 32px -8px rgb(16 24 40 / 0.18), 0 2px 6px rgb(16 24 40 / 0.06);
+  color-scheme: light;
+}
+
+/* Dark tokens: once for the OS preference, once for an explicit choice (CSS has no mixins) */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas: #0b0f17;
+    --surface: #111725;
+    --surface-2: #171e2e;
+    --surface-3: #1f2839;
+    --line: #222b3b;
+    --line-strong: #334155;
+    --ink: #e6e9ef;
+    --ink-2: #a3acbd;
+    --ink-3: #6b7588;
+
+    --brand: #6366f1;
+    --brand-strong: #818cf8;
+    --brand-soft: rgb(99 102 241 / 0.16);
+    --brand-ink: #c7d2fe;
+
+    --good-soft: rgb(12 163 12 / 0.14);
+    --good-ink: #5ee08b;
+    --warning-soft: rgb(250 178 25 / 0.14);
+    --warning-ink: #fcc94d;
+    --critical-soft: rgb(208 59 59 / 0.16);
+    --critical-ink: #ff8a80;
+    --info-soft: rgb(46 144 250 / 0.14);
+    --info-ink: #84caff;
+
+    --ring: rgb(129 140 248 / 0.45);
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-pop: 0 16px 40px -8px rgb(0 0 0 / 0.6), 0 2px 6px rgb(0 0 0 / 0.4);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --canvas: #0b0f17;
+  --surface: #111725;
+  --surface-2: #171e2e;
+  --surface-3: #1f2839;
+  --line: #222b3b;
+  --line-strong: #334155;
+  --ink: #e6e9ef;
+  --ink-2: #a3acbd;
+  --ink-3: #6b7588;
+
+  --brand: #6366f1;
+  --brand-strong: #818cf8;
+  --brand-soft: rgb(99 102 241 / 0.16);
+  --brand-ink: #c7d2fe;
+
+  --good-soft: rgb(12 163 12 / 0.14);
+  --good-ink: #5ee08b;
+  --warning-soft: rgb(250 178 25 / 0.14);
+  --warning-ink: #fcc94d;
+  --critical-soft: rgb(208 59 59 / 0.16);
+  --critical-ink: #ff8a80;
+  --info-soft: rgb(46 144 250 / 0.14);
+  --info-ink: #84caff;
+
+  --ring: rgb(129 140 248 / 0.45);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-pop: 0 16px 40px -8px rgb(0 0 0 / 0.6), 0 2px 6px rgb(0 0 0 / 0.4);
+  color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-ink: var(--brand-ink);
+  --color-good: var(--good);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+  --color-good-soft: var(--good-soft);
+  --color-good-ink: var(--good-ink);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-ink: var(--warning-ink);
+  --color-critical-soft: var(--critical-soft);
+  --color-critical-ink: var(--critical-ink);
+  --color-info-soft: var(--info-soft);
+  --color-info-ink: var(--info-ink);
+  --shadow-card: var(--shadow-card);
+  --shadow-pop: var(--shadow-pop);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Consistent, visible keyboard focus everywhere */
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection {
+  background: var(--brand-soft);
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.animate-in {
+  animation: fade-in-up 0.25s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

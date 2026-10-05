@@ -96,8 +96,10 @@ def test_login_returns_bearer_token(anon_client, analyst_user):
     body = response.json()
     assert body["token_type"] == "bearer"
     assert body["expires_in"] == auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-    assert body["user"] == {"id": analyst_user.id, "email": "analyst@sentinelfi.test",
-                            "full_name": "Compliance Analyst", "role": "analyst", "is_active": True}
+    user = {k: v for k, v in body["user"].items() if k not in ("created_at", "last_login_at")}
+    assert user == {"id": analyst_user.id, "email": "analyst@sentinelfi.test",
+                    "full_name": "Compliance Analyst", "role": "analyst", "is_active": True}
+    assert body["user"]["last_login_at"] is not None
 
     me = anon_client.get("/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
     assert me.json()["email"] == "analyst@sentinelfi.test"
