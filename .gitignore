@@ -29,3 +29,5 @@ backend/storage/
 coverage.xml
 test-results.xml
 htmlcov/
+
+info.txt

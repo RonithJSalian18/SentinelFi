@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import urllib.parse
@@ -21,6 +22,7 @@ from document_ai import extract_pdf_text, answer_question
 from tasks import enqueue_analysis, TERMINAL_STATUSES
 from aml_engine import ENGINE as AML_ENGINE
 from aml_engine.scanner import scan_circular_trading, ScanOptions
+from auth import require_admin, require_analyst, authenticate_websocket_token, bootstrap_admin, router as auth_router
 import models
 import notifier
 import storage
@@ -30,6 +32,7 @@ CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3
 
 # Create PostgreSQL tables (and any newly added columns) on startup
 sync_schema()
+bootstrap_admin()
 
 # Known malicious patterns (SQL Injection & XSS)
 SUSPICIOUS_PATTERNS = [
@@ -41,7 +44,12 @@ SUSPICIOUS_PATTERNS = [
 # 1. CREATE APPLICATION (Single instance only)
 app = FastAPI(
     title="SentinelFi Core Engine",
-    description="Enterprise KYB Automation and Risk Scoring API",
+    description=(
+        "Enterprise KYB Automation and Risk Scoring API.\n\n"
+        "Authenticate with **Authorize** (OAuth2 password flow). Roles: `analyst` "
+        "(Compliance Analyst: documents, scores, chat) and `admin` (System Admin: adds AML "
+        "scans, seeding and user management)."
+    ),
     version="1.0.0"
 )
 
@@ -90,6 +98,8 @@ async def zero_trust_security_shield(request: Request, call_next):
 
 
 # --- API ROUTES ---
+app.include_router(auth_router)
+
 SEED_LOOPS = [
     # (companies as (name, registration number), amounts per hop): each forms a closed loop
     ([("Alpha Holdings", "AH-001"), ("Beta Logistics", "BL-002"), ("Gamma Consulting", "GC-003")],
@@ -98,7 +108,7 @@ SEED_LOOPS = [
      [1200000, 1180000, 1165000, 1150000]),
 ]
 
-@app.post("/aml/seed-dummy-data")
+@app.post("/aml/seed-dummy-data", dependencies=[Depends(require_admin)])
 def seed_aml_data(db: Session = Depends(get_db)):
     """Creates a 3-hop and a 4-hop circular trading loop for testing, ensuring no duplicates."""
     try:
@@ -135,7 +145,7 @@ def seed_aml_data(db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/aml/detect-circular-trading")
+@app.get("/aml/detect-circular-trading", dependencies=[Depends(require_admin)])
 def detect_circular_trading(
     max_hops: int = Query(4, ge=2, le=8, description="Longest loop to search for"),
     min_amount: float = Query(10000, ge=0, description="Ignore transfers below this amount"),
@@ -159,7 +169,7 @@ def detect_circular_trading(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/aml/engine")
+@app.get("/aml/engine", dependencies=[Depends(require_admin)])
 def aml_engine_info():
     return {"engine": AML_ENGINE, "native": AML_ENGINE == "cpp"}
 
@@ -167,7 +177,7 @@ def aml_engine_info():
 def health_check():
     return {"status": "SentinelFi backend is secure and running.", "version": os.getenv("APP_VERSION", "dev")}
 
-@app.get("/db-health")
+@app.get("/db-health", dependencies=[Depends(require_admin)])
 def check_db_health(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
@@ -180,7 +190,8 @@ async def analyze_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     bank_name: str = Form("a Tier-1 Global Bank"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_analyst),
 ):
     """Archives the PDF in object storage, queues it for background risk analysis and
     returns immediately with a job id."""
@@ -207,6 +218,7 @@ async def analyze_document(
         document_key=stored.key,
         document_sha256=stored.sha256,
         document_size=stored.size,
+        submitted_by_id=user.id,
     )
     db.add(job)
     db.commit()
@@ -219,7 +231,7 @@ async def analyze_document(
         "websocket": f"/ws/jobs/{job.id}",
     }
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", dependencies=[Depends(require_analyst)])
 def get_job(job_id: str, db: Session = Depends(get_db)):
     job = db.get(models.DocumentJob, job_id)
     if job is None:
@@ -236,9 +248,20 @@ def _job_snapshot(job_id: str):
 
 @app.websocket("/ws/jobs/{job_id}")
 async def job_updates(websocket: WebSocket, job_id: str):
-    """Pushes live status for one analysis job until it completes or fails."""
+    """
+    Pushes live status for one analysis job until it completes or fails.
+    Browsers cannot set headers on WebSockets, so the client must send {"token": "<JWT>"}
+    as its first message (keeping the token out of URLs and access logs).
+    """
     await websocket.accept()
     try:
+        try:
+            message = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+            await run_in_threadpool(authenticate_websocket_token, message.get("token"))
+        except (asyncio.TimeoutError, HTTPException, ValueError, AttributeError):
+            await websocket.close(code=4401, reason="Authentication required")
+            return
+
         # Subscribe before reading the current state so no update can slip through the gap
         async with notifier.subscribe(job_id) as next_event:
             snapshot = await run_in_threadpool(_job_snapshot, job_id)
@@ -259,7 +282,7 @@ async def job_updates(websocket: WebSocket, job_id: str):
     except WebSocketDisconnect:
         pass
 
-@app.get("/documents")
+@app.get("/documents", dependencies=[Depends(require_analyst)])
 def list_documents(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
     """Audit archive: the most recently submitted documents and their analysis outcome."""
     jobs = (
@@ -279,6 +302,7 @@ def list_documents(limit: int = Query(20, ge=1, le=100), db: Session = Depends(g
             "document_available": job.document_key is not None,
             "document_sha256": job.document_sha256,
             "size_bytes": job.document_size,
+            "submitted_by": job.submitted_by.email if job.submitted_by else None,
             "created_at": job.created_at.isoformat() if job.created_at else None,
         }
         for job in jobs
@@ -290,7 +314,7 @@ def _archived_job(db: Session, job_id: str) -> models.DocumentJob:
         raise HTTPException(status_code=404, detail="Document not found.")
     return job
 
-@app.get("/documents/{job_id}/url")
+@app.get("/documents/{job_id}/url", dependencies=[Depends(require_analyst)])
 def get_document_url(job_id: str, request: Request, db: Session = Depends(get_db)):
     """Returns a short-lived URL for viewing the original PDF (S3 pre-signed URL in production)."""
     job = _archived_job(db, job_id)
@@ -319,7 +343,7 @@ def download_document(job_id: str, expires: int, signature: str, db: Session = D
         filename=storage.safe_filename(job.filename),
     )
 
-@app.post("/chat-document")
+@app.post("/chat-document", dependencies=[Depends(require_analyst)])
 async def chat_with_document(
     query: str = Form(...),
     file: Optional[UploadFile] = File(None),

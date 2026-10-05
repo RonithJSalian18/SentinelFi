@@ -105,22 +105,24 @@ jobs:
 
       - name: Smoke-test container
         run: |
-          docker run -d --name smoke -p 8000:8000 \
-            -e DATABASE_URL=sqlite:////tmp/smoke.db \
-            -e GEMINI_API_KEY=ci-placeholder \
-            ${{ env.IMAGE_NAME }}:ci
+          docker run -d --name smoke -p 8000:8000             -e DATABASE_URL=sqlite:////tmp/smoke.db             -e GEMINI_API_KEY=ci-placeholder             -e JWT_SECRET_KEY=ci-smoke-test-signing-key             -e BOOTSTRAP_ADMIN_EMAIL=ci-admin@sentinelfi.test             -e BOOTSTRAP_ADMIN_PASSWORD=ci-admin-password             ${{ env.IMAGE_NAME }}:ci
           for i in $(seq 1 30); do
             curl -fsS http://localhost:8000/ && break
             sleep 1
           done
           echo
           curl -fsS http://localhost:8000/ | grep -q '"version":"${{ github.sha }}"'
+          # Admin endpoints must reject anonymous callers
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/aml/engine)" = 401
+          # OAuth2 password flow against the bootstrapped System Admin
+          TOKEN=$(curl -fsS -X POST http://localhost:8000/auth/token             -d 'username=ci-admin@sentinelfi.test&password=ci-admin-password'             | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+          AUTH="Authorization: Bearer $TOKEN"
           # The image must ship the compiled C++ engine, not the Python fallback
-          curl -fsS http://localhost:8000/aml/engine | tee /dev/stderr | grep -q '"engine":"cpp"'
+          curl -fsS -H "$AUTH" http://localhost:8000/aml/engine | tee /dev/stderr | grep -q '"engine":"cpp"'
           # ...and the WAF must be live
           test "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8000/?q=DROP%20TABLE%20users')" = 403
-          curl -fsS -X POST http://localhost:8000/aml/seed-dummy-data
-          curl -fsS http://localhost:8000/aml/detect-circular-trading | grep -q threat_detected
+          curl -fsS -H "$AUTH" -X POST http://localhost:8000/aml/seed-dummy-data
+          curl -fsS -H "$AUTH" http://localhost:8000/aml/detect-circular-trading | grep -q threat_detected
 
       - name: Container logs
         if: failure()

@@ -22,11 +22,15 @@ os.environ.update({
     "AWS_ACCESS_KEY_ID": "testing",
     "AWS_SECRET_ACCESS_KEY": "testing",
     "AWS_REGION": "us-east-1",
+    "JWT_SECRET_KEY": "test-jwt-secret-key-with-plenty-of-entropy",
+    "BOOTSTRAP_ADMIN_EMAIL": "",
+    "BOOTSTRAP_ADMIN_PASSWORD": "",
 })
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import auth  # noqa: E402
 import database  # noqa: E402
 import main  # noqa: E402
 import models  # noqa: E402
@@ -45,10 +49,8 @@ FAKE_ANALYSIS = {
 }
 
 
-@pytest.fixture
-def client():
-    with TestClient(main.app) as test_client:
-        yield test_client
+TEST_PASSWORD = "correct-horse-battery-staple"
+_TEST_PASSWORD_HASH = auth.hash_password(TEST_PASSWORD)  # Argon2 is deliberately slow: hash once
 
 
 @pytest.fixture
@@ -58,10 +60,63 @@ def db():
     session.close()
 
 
+@pytest.fixture
+def make_user(db):
+    def factory(role="analyst", email=None, full_name="Test User", is_active=True):
+        user = models.User(
+            email=email or f"{role}-{db.query(models.User).count()}@sentinelfi.test",
+            full_name=full_name,
+            hashed_password=_TEST_PASSWORD_HASH,
+            role=role,
+            is_active=is_active,
+        )
+        db.add(user)
+        db.commit()
+        return user
+    return factory
+
+
+def bearer(user):
+    token, _ = auth.create_access_token(user)
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def admin_user(make_user):
+    return make_user("admin", email="admin@sentinelfi.test", full_name="Sys Admin")
+
+
+@pytest.fixture
+def analyst_user(make_user):
+    return make_user("analyst", email="analyst@sentinelfi.test", full_name="Compliance Analyst")
+
+
+@pytest.fixture
+def client(admin_user):
+    """Authenticated as a System Admin (full access)."""
+    with TestClient(main.app, headers=bearer(admin_user)) as test_client:
+        test_client.user = admin_user
+        yield test_client
+
+
+@pytest.fixture
+def analyst_client(analyst_user):
+    with TestClient(main.app, headers=bearer(analyst_user)) as test_client:
+        test_client.user = analyst_user
+        yield test_client
+
+
+@pytest.fixture
+def anon_client():
+    with TestClient(main.app) as test_client:
+        yield test_client
+
+
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     """Empty every table and reset the storage backend between tests."""
     monkeypatch.setattr(storage, "_storage", None)
+    auth.login_throttle.reset_all()
     yield
     with database.engine.begin() as conn:
         for table in reversed(models.Base.metadata.sorted_tables):

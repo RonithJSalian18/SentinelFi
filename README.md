@@ -15,6 +15,7 @@
 [![Celery](https://img.shields.io/badge/Task%20Queue-Celery%20%2B%20Redis-37814A.svg?style=flat-square&logo=celery&logoColor=white)](https://docs.celeryq.dev/)
 [![C++](https://img.shields.io/badge/AML%20Engine-C%2B%2B17%20%2B%20pybind11-00599C.svg?style=flat-square&logo=cplusplus&logoColor=white)](https://pybind11.readthedocs.io/)
 [![AWS S3](https://img.shields.io/badge/Storage-AWS%20S3-FF9900.svg?style=flat-square&logo=amazons3&logoColor=white)](https://aws.amazon.com/s3/)
+[![Auth](https://img.shields.io/badge/Auth-OAuth2%20%2B%20JWT%20%2B%20Auth.js-6C47FF.svg?style=flat-square&logo=jsonwebtokens&logoColor=white)](https://authjs.dev/)
 [![Security](https://img.shields.io/badge/Security-Zero--Trust%20Shield-critical.svg?style=flat-square&logo=shield)](https://github.com/RonithJSalian18/SentinelFi)
 
 ---
@@ -28,7 +29,8 @@ Corporate onboarding (Know Your Business - KYB) and continuous Anti-Money Launde
 2. **Surveils Transaction Ledgers for Circular AML Loops**: Detects multi-party round-trip transactions ($A \to B \to \dots \to A$, up to 8 entities) with a multi-threaded C++ graph engine bound to Python via pybind11.
 3. **Retains Original Filings for Audit**: Streams every uploaded PDF into encrypted AWS S3 storage with a SHA-256 fingerprint, and renders it in an embedded viewer through short-lived pre-signed URLs.
 4. **Interactively Interrogates Documents**: Empowers analysts to perform conversational due diligence on corporate PDFs with verified document grounding.
-5. **Protects Enterprise Infrastructure**: Enforces an active **Zero-Trust Security Shield** directly in the ASGI middleware pipeline, blocking SQL Injection and XSS attacks while applying strict HSTS and security headers.
+5. **Enforces Role-Based Access**: Only authorized bank personnel can sign in. Compliance Analysts review documents and risk scores, while AML scans and user management are reserved for System Admins, secured with OAuth2 and JWT bearer tokens.
+6. **Protects Enterprise Infrastructure**: Enforces an active **Zero-Trust Security Shield** directly in the ASGI middleware pipeline, blocking SQL Injection and XSS attacks while applying strict HSTS and security headers.
 
 ---
 
@@ -42,6 +44,7 @@ flowchart TD
 
     subgraph Security ["Zero-Trust Defense Layer"]
         Shield["Zero-Trust Security Shield\n(ASGI Middleware: SQLi/XSS Filter + HSTS)"]
+        RBAC["OAuth2 + JWT RBAC\n(analyst / admin)"]
     end
 
     subgraph Backend ["SentinelFi Core Engine (FastAPI)"]
@@ -66,15 +69,18 @@ flowchart TD
         Owners["beneficial_owners"]
         Ledgers["transaction_ledgers"]
         Jobs["document_jobs"]
+        Users["users"]
     end
 
     subgraph Storage ["Document Retention Layer"]
         S3[("AWS S3\n(SSE encrypted, versioned)")]
     end
 
-    UI -->|"HTTP / REST (CORS restricted)"| Shield
+    UI -->|"Sign in (Auth.js)"| RBAC
+    UI -->|"HTTP / REST + Bearer JWT (CORS restricted)"| Shield
     UI <-->|"WebSocket: live job status"| WS
-    Shield -->|"Sanitized Payloads"| Router
+    Shield -->|"Sanitized Payloads"| RBAC
+    RBAC -->|"Authorized by role"| Router
     Router -->|"Stream PDF + SHA-256"| S3
     Router -->|"202 Accepted + job_id"| Jobs
     Router -->|"Enqueue"| Redis
@@ -91,6 +97,7 @@ flowchart TD
     Postgres --- Owners
     Postgres --- Ledgers
     Postgres --- Jobs
+    Postgres --- Users
     UI -.->|"Pre-signed URL (embedded viewer)"| S3
 ```
 
@@ -151,7 +158,25 @@ A 3-way SQL self-join only finds loops of exactly three entities, and its cost e
 - Compliance officers can ask direct natural language questions against the uploaded PDF document (e.g., *"Who is the ultimate beneficial owner?", "Are there offshore subsidiaries mentioned?"*).
 - Grounded contextual answers generated with strict compliance-focused system prompts.
 
-### 5. 🛡️ Zero-Trust Security Shield
+### 5. 🔐 Role-Based Access Control (OAuth2 + JWT + Auth.js)
+| Capability | Compliance Analyst | System Admin |
+| :--- | :---: | :---: |
+| Submit documents for KYB analysis, view risk scores | ✅ | ✅ |
+| View archived filings, chat with documents | ✅ | ✅ |
+| Run AML circular-trading scans, seed test ledgers | ❌ | ✅ |
+| Create users, change roles, revoke access | ❌ | ✅ |
+
+- **OAuth2 password flow** (`POST /auth/token`) issues short-lived **HS256 JWT bearer tokens** (60 min by default). Swagger's **Authorize** button works out of the box.
+- **Passwords hashed with Argon2id** (`pwdlib`); unknown emails are checked against a dummy hash so response timing doesn't reveal which accounts exist.
+- **Roles re-checked against the database on every request**, never trusted from the token, so demoting or deactivating a user takes effect immediately, even for tokens already issued.
+- **Hardened token validation**: pinned algorithm (rejects `alg: none` and algorithm confusion), required `exp`/`iat`/`sub`/`iss` claims, issuer check.
+- **Brute-force protection**: 5 failed logins per account and client IP trigger a 15-minute lockout (`429` + `Retry-After`).
+- **WebSockets** authenticate with the JWT in the first message, keeping tokens out of URLs and access logs.
+- **Audit trail**: every uploaded filing records which user submitted it.
+- **Frontend**: [Auth.js](https://authjs.dev/) (NextAuth v5) Credentials provider exchanges the login for the API token. A Next.js 16 `proxy.ts` redirects unauthenticated visitors to `/login`, the dashboard adapts to the user's role, and admins get an in-app **User Management** panel. The session ends automatically when the API token expires.
+- **Provisioning**: bootstrap the first admin with `BOOTSTRAP_ADMIN_EMAIL`/`BOOTSTRAP_ADMIN_PASSWORD`, or use the CLI: `python manage_users.py create --email you@bank.com --name "Your Name" --role admin`.
+
+### 6. 🛡️ Zero-Trust Security Shield
 - Real-time ASGI middleware inspecting raw queries and URI paths for malicious attack vectors:
   - SQL Injection (`SELECT`, `DROP`, `INSERT`, comments `--`, etc.)
   - Cross-Site Scripting (`<script>`, `<img onerror=...`)
@@ -169,6 +194,7 @@ A 3-way SQL self-join only finds loops of exactly three entities, and its cost e
 | :--- | :--- |
 | **Frontend** | [Next.js 16](https://nextjs.org/) (App Router), [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Tailwind CSS v4](https://tailwindcss.com/), [Lucide React](https://lucide.dev/), [Axios](https://axios-http.com/) |
 | **Backend API** | [FastAPI](https://fastapi.tiangolo.com/) (Python 3.10+), [Uvicorn](https://www.uvicorn.org/), Starlette Middleware, WebSockets |
+| **Authentication** | OAuth2 password flow, JWT ([PyJWT](https://pyjwt.readthedocs.io/)), Argon2id ([pwdlib](https://frankie567.github.io/pwdlib/)), [Auth.js](https://authjs.dev/) (NextAuth v5) |
 | **Task Queue** | [Celery](https://docs.celeryq.dev/), [Redis](https://redis.io/) (broker + pub/sub) |
 | **AI / LLM** | [Google Gemini 2.5 Flash](https://ai.google.dev/) via `google-genai` SDK (Structured JSON output schema) |
 | **Document Processing** | [PyPDF](https://pypdf.readthedocs.io/) |
@@ -191,6 +217,8 @@ sentinelfi/
 │   ├── database.py             # Database engine & session dependency (pool_pre_ping)
 │   ├── models.py               # SQLAlchemy models (Entities, Owners, Ledgers)
 │   ├── main.py                 # FastAPI application, routes, WebSocket & Zero-Trust Shield
+│   ├── auth.py                 # OAuth2/JWT authentication, RBAC & user management
+│   ├── manage_users.py         # CLI for creating and listing users
 │   ├── tasks.py                # Celery app & async document analysis pipeline
 │   ├── notifier.py             # Job status fan-out (Redis pub/sub or in-process)
 │   ├── document_ai.py          # PDF text extraction & Gemini prompts
@@ -209,10 +237,15 @@ sentinelfi/
 │   ├── Dockerfile              # Docker container configuration
 │   └── .env.example            # Backend environment variables template
 ├── frontend/
-│   ├── lib/api.ts              # API/WebSocket base URLs & error helpers
+│   ├── auth.ts                 # Auth.js config (Credentials → FastAPI JWT)
+│   ├── proxy.ts                # Redirects unauthenticated visitors to /login
+│   ├── lib/api.ts              # Authenticated API client, WebSocket base URL & error helpers
 │   ├── app/
 │   │   ├── layout.tsx          # Root Next.js layout
 │   │   ├── page.tsx            # SentinelFi compliance dashboard & AML visualizer
+│   │   ├── login/page.tsx      # Sign-in page
+│   │   ├── components/UserManagement.tsx  # Admin user management panel
+│   │   ├── api/auth/[...nextauth]/route.ts  # Auth.js route handler
 │   │   └── globals.css         # Global stylesheet & Tailwind CSS imports
 │   ├── package.json            # Frontend package scripts & dependencies
 │   ├── tsconfig.json           # TypeScript configuration
@@ -265,6 +298,8 @@ Ensure you have the following installed:
    ```env
    DATABASE_URL=postgresql://postgres:password@localhost:5432/sentinelfi
    GEMINI_API_KEY=your_gemini_api_key_here
+   # Signing key for API access tokens (python -c "import secrets; print(secrets.token_urlsafe(64))")
+   JWT_SECRET_KEY=your_long_random_secret
    # Optional: enable the Celery task queue
    # REDIS_URL=redis://localhost:6379/0
    # Optional: archive documents in S3 (otherwise stored in backend/storage/)
@@ -274,20 +309,26 @@ Ensure you have the following installed:
    # AWS_SECRET_ACCESS_KEY=...
    ```
 
-5. **Start the FastAPI backend server**:
+5. **Create your first System Admin**:
+   ```bash
+   python manage_users.py create --email you@yourbank.com --name "Your Name" --role admin
+   ```
+   (Or set `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`, and the account is created on startup.) Further users can then be added from the dashboard's **User Management** panel.
+
+6. **Start the FastAPI backend server**:
    ```bash
    uvicorn main:app --reload --host 127.0.0.1 --port 8000
    ```
    The API will be live at `http://127.0.0.1:8000` with interactive Swagger docs at `http://127.0.0.1:8000/docs`.
 
-6. **(Recommended) Build the native C++ AML engine**:
+7. **(Recommended) Build the native C++ AML engine**:
    ```bash
    pip install pybind11 setuptools
    python setup.py build_ext --inplace
    ```
    Requires a C++17 compiler (g++/clang on Linux/macOS; [MSVC Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) on Windows, run from the *x64 Native Tools Command Prompt*). Skip it and the pure-Python engine is used automatically; `GET /aml/engine` reports which one is active.
 
-7. **(Optional) Start a Celery worker** — only when `REDIS_URL` is set. Without it, documents are processed in-process by FastAPI `BackgroundTasks`.
+8. **(Optional) Start a Celery worker** — only when `REDIS_URL` is set. Without it, documents are processed in-process by FastAPI `BackgroundTasks`.
    ```bash
    # Linux / macOS
    celery -A tasks worker --loglevel=info
@@ -310,9 +351,10 @@ Ensure you have the following installed:
    npm install
    ```
 
-3. **(Optional) Point at a non-local API** by creating `frontend/.env.local`:
+3. **Configure Auth.js** by creating `frontend/.env.local` (see `frontend/.env.example`):
    ```env
-   NEXT_PUBLIC_API_URL=https://your-api.example.com
+   AUTH_SECRET=generate_with_npx_auth_secret
+   NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
    ```
 
 4. **Run the Next.js development server**:
@@ -321,32 +363,37 @@ Ensure you have the following installed:
    ```
 
 5. **Access the Dashboard**:
-   Open [http://localhost:3000](http://localhost:3000) in your browser.
+   Open [http://localhost:3000](http://localhost:3000) and sign in with the account you created.
 
 ---
 
 ## 📡 API Reference
 
-| Method | Endpoint | Description | Payload / Parameters |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/` | Health Check | None |
-| `GET` | `/db-health` | PostgreSQL connectivity probe | None |
-| `POST` | `/analyze-document` | Queues a PDF for async KYB risk analysis; returns `202` + `job_id` | `file`: PDF binary, `bank_name`: string |
-| `GET` | `/jobs/{job_id}` | Job status & analysis result | `job_id`: path |
-| `WS` | `/ws/jobs/{job_id}` | Live push of job status until `completed` / `failed` | `job_id`: path |
-| `GET` | `/documents` | Audit archive of retained filings | `limit` (1-100) |
-| `GET` | `/documents/{job_id}/url` | Short-lived pre-signed URL for the original PDF | `job_id`: path |
-| `GET` | `/documents/{job_id}/file` | Serves a locally archived PDF (local mode only) | `expires`, `signature` |
-| `POST` | `/chat-document` | Grounded conversational Q&A on PDF | `query` + either `job_id` (archived document) or `file` |
-| `POST` | `/aml/seed-dummy-data` | Seeds a test circular trading loop | None |
-| `GET` | `/aml/detect-circular-trading`| Detects round-tripping loops with the graph engine | `max_hops` (2-8), `min_amount`, `chronological`, `window_days`, `max_results` |
-| `GET` | `/aml/engine` | Reports the active engine (`cpp` or `python`) | None |
+| Method | Endpoint | Description | Access | Payload / Parameters |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/` | Health check & deployed version | Public | None |
+| `POST` | `/auth/token` | OAuth2 password flow: returns a JWT bearer token | Public | form: `username` (email), `password` |
+| `GET` | `/auth/me` | Current user profile | Any role | None |
+| `GET` | `/auth/users` | List users | Admin | None |
+| `POST` | `/auth/users` | Create a user | Admin | JSON: `email`, `full_name`, `password` (12+), `role` |
+| `PATCH` | `/auth/users/{id}` | Change role / revoke access | Admin | JSON: `role`, `is_active` |
+| `GET` | `/db-health` | PostgreSQL connectivity probe | Admin | None |
+| `POST` | `/analyze-document` | Queues a PDF for async KYB risk analysis; returns `202` + `job_id` | Analyst, Admin | `file`: PDF binary, `bank_name`: string |
+| `GET` | `/jobs/{job_id}` | Job status & analysis result | Analyst, Admin | `job_id`: path |
+| `WS` | `/ws/jobs/{job_id}` | Live push of job status until `completed` / `failed` | Analyst, Admin | first message: `{"token": "<JWT>"}` |
+| `GET` | `/documents` | Audit archive of retained filings | Analyst, Admin | `limit` (1-100) |
+| `GET` | `/documents/{job_id}/url` | Short-lived pre-signed URL for the original PDF | Analyst, Admin | `job_id`: path |
+| `GET` | `/documents/{job_id}/file` | Serves a locally archived PDF (local mode only) | Signed URL | `expires`, `signature` |
+| `POST` | `/chat-document` | Grounded conversational Q&A on PDF | Analyst, Admin | `query` + either `job_id` (archived document) or `file` |
+| `POST` | `/aml/seed-dummy-data` | Seeds test circular trading loops | Admin | None |
+| `GET` | `/aml/detect-circular-trading`| Detects round-tripping loops with the graph engine | Admin | `max_hops` (2-8), `min_amount`, `chronological`, `window_days`, `max_results` |
+| `GET` | `/aml/engine` | Reports the active engine (`cpp` or `python`) | Admin | None |
 
 ---
 
 ## ✅ Automated Tests
 
-The backend ships with a pytest suite of ~95 tests (≈90% line coverage) that runs without any external services: SQLite replaces PostgreSQL, Gemini is stubbed, S3 and KMS are emulated with moto, and the test config blanks out any Redis/S3/database settings from your local `.env` so tests can never touch real infrastructure.
+The backend ships with a pytest suite of ~160 tests (≈90% line coverage) that runs without any external services: SQLite replaces PostgreSQL, Gemini is stubbed, S3 and KMS are emulated with moto, and the test config blanks out any Redis/S3/database settings from your local `.env` so tests can never touch real infrastructure.
 
 | Suite | What it proves |
 | :--- | :--- |
@@ -355,6 +402,7 @@ The backend ships with a pytest suite of ~95 tests (≈90% line coverage) that r
 | `test_websocket.py` | Live `queued → processing → completed` push and per-job isolation |
 | `test_aml_engine.py` | Known-answer graphs for both engines + randomized C++ ⇄ Python parity (multi-threaded, multi-chunk) |
 | `test_aml_api.py` | Seeding, loop detection, `max_hops` / `min_amount` / `chronological` / `window_days`, parameter validation |
+| `test_auth.py` | Full role/endpoint permission matrix, login & lockout, forged/expired/`alg:none` tokens, roles read from the DB (instant demotion/revocation), user management, admin bootstrap |
 | `test_schema.py` | Upgrading a legacy database adds new columns without losing data |
 
 ```bash
@@ -382,7 +430,7 @@ flowchart LR
 ```
 
 - **Quality gates**: the native C++ engine must compile (`REQUIRE_NATIVE_ENGINE=1`) and every test must pass before an image is built.
-- **Container smoke test**: the freshly built image is started and probed: health check, baked-in commit version, native `cpp` engine present, WAF blocking `DROP TABLE`, and an end-to-end AML seed + scan.
+- **Container smoke test**: the freshly built image is started and probed: health check, baked-in commit version, anonymous access rejected, OAuth2 login as a bootstrapped admin, native `cpp` engine present, WAF blocking `DROP TABLE`, and an end-to-end AML seed + scan.
 - **Immutable deploys**: Render is told to deploy the exact image digest that passed the pipeline; the job then waits until production reports the new commit SHA.
 - **Safe by default**: the push and deploy stages skip themselves until credentials are configured, so pull requests and forks still get full test feedback.
 
@@ -391,16 +439,16 @@ flowchart LR
 1. **Docker Hub**: create an access token (*Account Settings → Personal access tokens*, read & write). In GitHub, go to *Settings → Secrets and variables → Actions* and add:
    - Variable `DOCKERHUB_USERNAME`: your Docker Hub username (a variable, not a secret, so the image name can be passed between jobs)
    - Secret `DOCKERHUB_TOKEN`: the access token
-2. **Render**: push once so the image exists, then create a *Web Service → Deploy an existing image* from `docker.io/<username>/sentinelfi-backend:latest`. Add the backend environment variables (`DATABASE_URL`, `GEMINI_API_KEY`, `CORS_ORIGINS`, and optionally `REDIS_URL`, `S3_*`). Render's `$PORT` is respected automatically.
+2. **Render**: push once so the image exists, then create a *Web Service → Deploy an existing image* from `docker.io/<username>/sentinelfi-backend:latest`. Add the backend environment variables (`DATABASE_URL`, `GEMINI_API_KEY`, `JWT_SECRET_KEY`, `CORS_ORIGINS`, `BOOTSTRAP_ADMIN_EMAIL`/`BOOTSTRAP_ADMIN_PASSWORD` for the first login, and optionally `REDIS_URL`, `S3_*`). Render's `$PORT` is respected automatically.
 3. Copy the service's **Deploy Hook** URL (*Settings → Deploy Hook*) into a GitHub secret `RENDER_DEPLOY_HOOK_URL`.
 4. Optionally add a variable `PRODUCTION_URL` (e.g. `https://sentinelfi-api.onrender.com`) so the pipeline verifies the new version is live.
-5. Deploy the frontend to Vercel (or similar) with `NEXT_PUBLIC_API_URL` pointing at the Render URL, and add the frontend's origin to the backend's `CORS_ORIGINS`.
+5. Deploy the frontend to Vercel (or similar) with `NEXT_PUBLIC_API_URL` pointing at the Render URL and an `AUTH_SECRET` (add `AUTH_TRUST_HOST=true` when self-hosting), and add the frontend's origin to the backend's `CORS_ORIGINS`.
 
 ---
 
 ## 🧪 Testing the AML Detection Engine
 
-1. In the SentinelFi Dashboard, locate the **AML Graph Surveillance** banner.
+1. Sign in as a **System Admin** and locate the **AML Graph Surveillance** banner (analysts see it as restricted).
 2. Click **"Seed Test Loops"** (or make a `POST /aml/seed-dummy-data` request). This seeds two closed shell-company loops:
    $$\text{Alpha Holdings } \xrightarrow{\$500,000} \text{Beta Logistics } \xrightarrow{\$495,000} \text{Gamma Consulting } \xrightarrow{\$490,000} \text{Alpha Holdings}$$
    $$\text{Delta Capital } \xrightarrow{\$1.2M} \text{Epsilon Trading } \xrightarrow{} \text{Zeta Imports } \xrightarrow{} \text{Eta Ventures } \xrightarrow{\$1.15M} \text{Delta Capital}$$
@@ -464,6 +512,7 @@ docker run -d -p 8000:8000 \
 
 ## 🔒 Security Posture
 
+- **Authenticated & Authorized**: Every endpoint except the health check and sign-in requires a valid JWT; authorization is enforced per role server-side, not just hidden in the UI.
 - **Zero-Trust Request Inspection**: Every incoming query string is unquoted and matched against injection patterns prior to application processing.
 - **Enterprise Headers**: Mitigates MIME-sniffing, framing (clickjacking), and insecure protocol downgrade via strict HSTS headers.
 - **Data Isolation**: CORS policies configured specifically for permitted frontend origins (`CORS_ORIGINS`, default `http://localhost:3000`).

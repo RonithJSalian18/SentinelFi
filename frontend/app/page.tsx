@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
-import axios from "axios";
-import { API_BASE, WS_BASE, errorDetail } from "@/lib/api";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { signOut, useSession } from "next-auth/react";
+import { WS_BASE, createApiClient, errorDetail } from "@/lib/api";
+import UserManagement from "./components/UserManagement";
 import {
   ShieldAlert,
   UploadCloud,
@@ -17,6 +18,8 @@ import {
   FileText,
   ExternalLink,
   Archive,
+  LogOut,
+  Lock,
 } from "lucide-react";
 
 interface RiskAnalysis {
@@ -55,6 +58,7 @@ interface ArchivedDocument {
   document_available: boolean;
   document_sha256: string | null;
   size_bytes: number | null;
+  submitted_by: string | null;
   created_at: string | null;
 }
 
@@ -105,7 +109,18 @@ interface AMLResponse {
   stats?: AMLStats;
 }
 
+const ROLE_LABELS = { admin: "System Admin", analyst: "Compliance Analyst" };
+
 export default function Dashboard() {
+  // Session: every API call carries the user's bearer token; a 401 ends the session
+  const { data: session, status: sessionStatus } = useSession();
+  const accessToken = session?.accessToken;
+  const isAdmin = session?.user.role === "admin";
+  const api = useMemo(
+    () => createApiClient(accessToken, () => signOut({ redirectTo: "/login" })),
+    [accessToken],
+  );
+
   // Document State
   const [file, setFile] = useState<File | null>(null);
   const [bankName, setBankName] = useState("Tier-1 Global Bank");
@@ -135,33 +150,31 @@ export default function Dashboard() {
 
   useEffect(() => () => socketRef.current?.close(), []);
 
-  const fetchArchive = () =>
-    axios
-      .get<ArchivedDocument[]>(`${API_BASE}/documents`)
-      .then((response) => response.data);
-
   // The archive is supplementary: on failure, keep showing the previous list
   const loadArchive = () =>
-    fetchArchive()
-      .then(setArchive)
+    api
+      .get<ArchivedDocument[]>("/documents")
+      .then((response) => setArchive(response.data))
       .catch(() => {});
 
   useEffect(() => {
+    if (!accessToken) return;
     let active = true;
-    fetchArchive()
-      .then((data) => active && setArchive(data))
+    api
+      .get<ArchivedDocument[]>("/documents")
+      .then((response) => active && setArchive(response.data))
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, []);
+  }, [api, accessToken]);
 
   // Fetch a fresh short-lived (pre-signed) URL each time a document is opened
   const openDocument = async (jobId: string) => {
     setViewerError("");
     try {
-      const { data } = await axios.get<DocumentLink>(
-        `${API_BASE}/documents/${jobId}/url`,
+      const { data } = await api.get<DocumentLink>(
+        `/documents/${jobId}/url`,
       );
       setViewer(data);
     } catch (err) {
@@ -209,7 +222,7 @@ export default function Dashboard() {
       for (let i = 0; i < JOB_POLL_MAX_ATTEMPTS && !settled; i++) {
         await new Promise((r) => setTimeout(r, JOB_POLL_INTERVAL_MS));
         try {
-          const { data } = await axios.get<JobUpdate>(`${API_BASE}/jobs/${jobId}`);
+          const { data } = await api.get<JobUpdate>(`/jobs/${jobId}`);
           handleUpdate(data);
         } catch {
           // transient network error: keep polling
@@ -227,6 +240,8 @@ export default function Dashboard() {
     socketRef.current?.close();
     const socket = new WebSocket(`${WS_BASE}/ws/jobs/${jobId}`);
     socketRef.current = socket;
+    // Browsers can't set headers on WebSockets: authenticate with the first message
+    socket.onopen = () => socket.send(JSON.stringify({ token: accessToken }));
     socket.onmessage = (event) => handleUpdate(JSON.parse(event.data));
     socket.onclose = () => {
       if (!settled) pollFallback();
@@ -250,8 +265,8 @@ export default function Dashboard() {
     formData.append("bank_name", bankName);
 
     try {
-      const response = await axios.post<JobUpdate>(
-        `${API_BASE}/analyze-document`,
+      const response = await api.post<JobUpdate>(
+        "/analyze-document",
         formData,
         { headers: { "Content-Type": "multipart/form-data" } },
       );
@@ -279,8 +294,8 @@ export default function Dashboard() {
     formData.append("query", chatQuery);
 
     try {
-      const response = await axios.post(
-        `${API_BASE}/chat-document`,
+      const response = await api.post(
+        "/chat-document",
         formData,
         {
           headers: { "Content-Type": "multipart/form-data" },
@@ -298,8 +313,8 @@ export default function Dashboard() {
     setAmlLoading(true);
     setAmlStatusNote("");
     try {
-      const response = await axios.get<AMLResponse>(
-        `${API_BASE}/aml/detect-circular-trading`,
+      const response = await api.get<AMLResponse>(
+        "/aml/detect-circular-trading",
         { params: { max_hops: maxHops, chronological } },
       );
       setAmlResults(response.data);
@@ -313,7 +328,7 @@ export default function Dashboard() {
   const seedDummyData = async () => {
     setAmlLoading(true);
     try {
-      await axios.post(`${API_BASE}/aml/seed-dummy-data`);
+      await api.post("/aml/seed-dummy-data");
       setAmlStatusNote("Simulated ledger seeded successfully. Run scan now.");
       await runAMLScan();
     } catch {
@@ -322,6 +337,14 @@ export default function Dashboard() {
       setAmlLoading(false);
     }
   };
+
+  if (sessionStatus === "loading" || !session) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <RefreshCw className="w-6 h-6 text-slate-400 animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-6 md:p-10 font-sans">
@@ -406,187 +429,228 @@ export default function Dashboard() {
               </p>
             </div>
           </div>
-          <div className="flex items-center space-x-2">
-            <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
-              Zero-Trust Shield Active
-            </span>
+          <div className="flex flex-wrap items-center gap-5">
+            <div className="flex items-center space-x-2">
+              <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                Zero-Trust Shield Active
+              </span>
+            </div>
+            <div className="flex items-center space-x-3 pl-5 border-l border-slate-200">
+              <div className="text-right">
+                <p className="text-sm font-semibold text-slate-800">
+                  {session.user.name}
+                </p>
+                <span
+                  className={`text-[11px] font-semibold uppercase tracking-wider ${
+                    isAdmin ? "text-indigo-600" : "text-blue-600"
+                  }`}
+                >
+                  {ROLE_LABELS[session.user.role]}
+                </span>
+              </div>
+              <button
+                onClick={() => signOut({ redirectTo: "/login" })}
+                aria-label="Sign out"
+                title="Sign out"
+                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </header>
 
-        {/* Top Feature: AML Circular Trading Surveillance Banner */}
-        <section className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center space-x-3">
-              <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
-                <Network className="w-5 h-5" />
+        {/* Top Feature: AML Circular Trading Surveillance Banner (System Admins only) */}
+        {isAdmin ? (
+            <section className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+                    <Network className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold text-slate-900">
+                      AML Graph Surveillance: Circular Trading Engine
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      In-memory C++ graph engine that unmasks round-tripping &
+                      money-laundering loops of up to 8 entities.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex items-center space-x-1.5 text-xs text-slate-600">
+                    <span>Max hops</span>
+                    <select
+                      value={maxHops}
+                      onChange={(e) => setMaxHops(Number(e.target.value))}
+                      disabled={amlLoading}
+                      className="px-2 py-1.5 border border-slate-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {[2, 3, 4, 5, 6, 7, 8].map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label
+                    className="flex items-center space-x-1.5 text-xs text-slate-600"
+                    title="Only flag loops where each transfer happens after the previous one"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={chronological}
+                      onChange={(e) => setChronological(e.target.checked)}
+                      disabled={amlLoading}
+                      className="accent-indigo-600"
+                    />
+                    <span>Chronological</span>
+                  </label>
+                  <button
+                    onClick={seedDummyData}
+                    disabled={amlLoading}
+                    className="text-xs px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-lg transition disabled:opacity-50"
+                  >
+                    Seed Test Loops
+                  </button>
+                  <button
+                    onClick={runAMLScan}
+                    disabled={amlLoading}
+                    className="flex items-center space-x-1.5 text-xs px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-sm transition disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${amlLoading ? "animate-spin" : ""}`}
+                    />
+                    <span>
+                      {amlLoading ? "Scanning Network..." : "Run AML Scan"}
+                    </span>
+                  </button>
+                </div>
               </div>
-              <div>
-                <h2 className="text-base font-semibold text-slate-900">
-                  AML Graph Surveillance: Circular Trading Engine
-                </h2>
-                <p className="text-xs text-slate-500">
-                  In-memory C++ graph engine that unmasks round-tripping &
-                  money-laundering loops of up to 8 entities.
+
+              {amlStatusNote && (
+                <p className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-100 p-2.5 rounded-lg">
+                  {amlStatusNote}
                 </p>
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="flex items-center space-x-1.5 text-xs text-slate-600">
-                <span>Max hops</span>
-                <select
-                  value={maxHops}
-                  onChange={(e) => setMaxHops(Number(e.target.value))}
-                  disabled={amlLoading}
-                  className="px-2 py-1.5 border border-slate-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  {[2, 3, 4, 5, 6, 7, 8].map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label
-                className="flex items-center space-x-1.5 text-xs text-slate-600"
-                title="Only flag loops where each transfer happens after the previous one"
-              >
-                <input
-                  type="checkbox"
-                  checked={chronological}
-                  onChange={(e) => setChronological(e.target.checked)}
-                  disabled={amlLoading}
-                  className="accent-indigo-600"
-                />
-                <span>Chronological</span>
-              </label>
-              <button
-                onClick={seedDummyData}
-                disabled={amlLoading}
-                className="text-xs px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-lg transition disabled:opacity-50"
-              >
-                Seed Test Loops
-              </button>
-              <button
-                onClick={runAMLScan}
-                disabled={amlLoading}
-                className="flex items-center space-x-1.5 text-xs px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-sm transition disabled:opacity-50"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${amlLoading ? "animate-spin" : ""}`}
-                />
-                <span>
-                  {amlLoading ? "Scanning Network..." : "Run AML Scan"}
-                </span>
-              </button>
-            </div>
-          </div>
-
-          {amlStatusNote && (
-            <p className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-100 p-2.5 rounded-lg">
-              {amlStatusNote}
-            </p>
-          )}
-
-          {/* AML Scan Output */}
-          {amlResults?.stats && (
-            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
-              <span>
-                Engine:{" "}
-                <strong className="text-slate-700">
-                  {amlResults.stats.engine === "cpp"
-                    ? "Native C++ (pybind11)"
-                    : "Python fallback"}
-                </strong>
-              </span>
-              <span>
-                Transactions scanned:{" "}
-                <strong className="text-slate-700">
-                  {amlResults.stats.transactions_scanned.toLocaleString()}
-                </strong>
-              </span>
-              <span>
-                Entities in graph:{" "}
-                <strong className="text-slate-700">
-                  {amlResults.stats.entities_in_graph.toLocaleString()}
-                </strong>
-              </span>
-              <span>
-                Graph scan:{" "}
-                <strong className="text-slate-700">
-                  {amlResults.stats.scan_ms.toFixed(1)} ms
-                </strong>
-              </span>
-              {amlResults.stats.truncated && (
-                <span className="text-amber-700">
-                  Results truncated: showing first{" "}
-                  {amlResults.stats.cycles_found.toLocaleString()} loops
-                </span>
               )}
-            </div>
-          )}
-          {amlResults && (
-            <div className="pt-2">
-              {amlResults.status === "threat_detected" ? (
-                <div className="bg-rose-50 border border-rose-200 rounded-lg p-4 space-y-3">
-                  <div className="flex items-center space-x-2 text-rose-700 font-semibold text-sm">
-                    <AlertTriangle className="w-4 h-4" />
-                    <span>CRITICAL ALERT: {amlResults.alert}</span>
-                  </div>
-                  <div className="space-y-2">
-                    {amlResults.evidence?.map((loop, idx) => (
-                      <div
-                        key={idx}
-                        className="bg-white border border-rose-100 p-3 rounded-lg flex flex-wrap items-center justify-between text-xs gap-3"
-                      >
-                        <div className="flex items-center flex-wrap gap-2 font-mono font-medium text-slate-800">
-                          {[...loop.path, loop.path[0]].map((entity, i) => (
-                            <React.Fragment key={i}>
-                              {i > 0 && (
-                                <ArrowRight
-                                  className={`w-3.5 h-3.5 ${i === loop.path.length ? "text-rose-500" : "text-slate-400"}`}
-                                />
-                              )}
-                              <span
-                                className={`px-2.5 py-1 rounded ${
-                                  i === 0 || i === loop.path.length
-                                    ? "bg-rose-100 text-rose-800"
-                                    : "bg-amber-100 text-amber-800"
-                                }`}
-                              >
-                                {entity}
-                              </span>
-                            </React.Fragment>
-                          ))}
-                        </div>
-                        <div className="text-slate-500 font-sans">
-                          {loop.hops} hops · Transfer Vol:{" "}
-                          <strong className="text-slate-800">
-                            $
-                            {loop.initial_amount.toLocaleString()}
-                          </strong>{" "}
-                          → Return:{" "}
-                          <strong className="text-slate-800">
-                            $
-                            {loop.return_amount.toLocaleString()}
-                          </strong>{" "}
-                          ({loop.retention_pct}% returned)
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs p-3 rounded-lg flex items-center space-x-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+
+              {/* AML Scan Output */}
+              {amlResults?.stats && (
+                <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
                   <span>
-                    {amlResults.message || "No illicit loops identified."}
+                    Engine:{" "}
+                    <strong className="text-slate-700">
+                      {amlResults.stats.engine === "cpp"
+                        ? "Native C++ (pybind11)"
+                        : "Python fallback"}
+                    </strong>
                   </span>
+                  <span>
+                    Transactions scanned:{" "}
+                    <strong className="text-slate-700">
+                      {amlResults.stats.transactions_scanned.toLocaleString()}
+                    </strong>
+                  </span>
+                  <span>
+                    Entities in graph:{" "}
+                    <strong className="text-slate-700">
+                      {amlResults.stats.entities_in_graph.toLocaleString()}
+                    </strong>
+                  </span>
+                  <span>
+                    Graph scan:{" "}
+                    <strong className="text-slate-700">
+                      {amlResults.stats.scan_ms.toFixed(1)} ms
+                    </strong>
+                  </span>
+                  {amlResults.stats.truncated && (
+                    <span className="text-amber-700">
+                      Results truncated: showing first{" "}
+                      {amlResults.stats.cycles_found.toLocaleString()} loops
+                    </span>
+                  )}
                 </div>
               )}
+              {amlResults && (
+                <div className="pt-2">
+                  {amlResults.status === "threat_detected" ? (
+                    <div className="bg-rose-50 border border-rose-200 rounded-lg p-4 space-y-3">
+                      <div className="flex items-center space-x-2 text-rose-700 font-semibold text-sm">
+                        <AlertTriangle className="w-4 h-4" />
+                        <span>CRITICAL ALERT: {amlResults.alert}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {amlResults.evidence?.map((loop, idx) => (
+                          <div
+                            key={idx}
+                            className="bg-white border border-rose-100 p-3 rounded-lg flex flex-wrap items-center justify-between text-xs gap-3"
+                          >
+                            <div className="flex items-center flex-wrap gap-2 font-mono font-medium text-slate-800">
+                              {[...loop.path, loop.path[0]].map((entity, i) => (
+                                <React.Fragment key={i}>
+                                  {i > 0 && (
+                                    <ArrowRight
+                                      className={`w-3.5 h-3.5 ${i === loop.path.length ? "text-rose-500" : "text-slate-400"}`}
+                                    />
+                                  )}
+                                  <span
+                                    className={`px-2.5 py-1 rounded ${
+                                      i === 0 || i === loop.path.length
+                                        ? "bg-rose-100 text-rose-800"
+                                        : "bg-amber-100 text-amber-800"
+                                    }`}
+                                  >
+                                    {entity}
+                                  </span>
+                                </React.Fragment>
+                              ))}
+                            </div>
+                            <div className="text-slate-500 font-sans">
+                              {loop.hops} hops · Transfer Vol:{" "}
+                              <strong className="text-slate-800">
+                                $
+                                {loop.initial_amount.toLocaleString()}
+                              </strong>{" "}
+                              → Return:{" "}
+                              <strong className="text-slate-800">
+                                $
+                                {loop.return_amount.toLocaleString()}
+                              </strong>{" "}
+                              ({loop.retention_pct}% returned)
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs p-3 rounded-lg flex items-center space-x-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>
+                        {amlResults.message || "No illicit loops identified."}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+        ) : (
+          <section className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm flex items-center space-x-3">
+            <div className="p-2 bg-slate-100 text-slate-500 rounded-lg">
+              <Lock className="w-5 h-5" />
             </div>
-          )}
-        </section>
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">
+                AML Graph Surveillance
+              </h2>
+              <p className="text-xs text-slate-500">
+                Ledger scans and test-data seeding are restricted to System
+                Admins.
+              </p>
+            </div>
+          </section>
+        )}
 
         {/* Main Content Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -851,6 +915,7 @@ export default function Dashboard() {
                     <th className="py-2 pr-4 font-semibold">Status</th>
                     <th className="py-2 pr-4 font-semibold">Risk</th>
                     <th className="py-2 pr-4 font-semibold">Uploaded</th>
+                    <th className="py-2 pr-4 font-semibold">Submitted by</th>
                     <th className="py-2 pr-4 font-semibold">SHA-256</th>
                     <th className="py-2 font-semibold sr-only">Actions</th>
                   </tr>
@@ -884,6 +949,9 @@ export default function Dashboard() {
                           ? new Date(doc.created_at).toLocaleString()
                           : "-"}
                       </td>
+                      <td className="py-2.5 pr-4 text-slate-500">
+                        {doc.submitted_by ?? "-"}
+                      </td>
                       <td
                         className="py-2.5 pr-4 font-mono text-slate-400"
                         title={doc.document_sha256 ?? undefined}
@@ -910,6 +978,10 @@ export default function Dashboard() {
             </div>
           )}
         </section>
+
+        {isAdmin && (
+          <UserManagement api={api} currentUserId={session.user.id} />
+        )}
       </div>
     </div>
   );

@@ -1,9 +1,23 @@
 import uuid
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Text
+from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, JSON, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
+
+class User(Base):
+    """Bank personnel allowed into SentinelFi. role: 'analyst' (Compliance Analyst) or 'admin' (System Admin)."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)  # stored lower-case
+    full_name = Column(String, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="analyst")
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_login_at = Column(DateTime(timezone=True))
+
 
 class CorporateEntity(Base):
     __tablename__ = "corporate_entities"
@@ -54,8 +68,11 @@ class DocumentJob(Base):
     document_key = Column(String)       # object-store key of the original PDF
     document_sha256 = Column(String(64))
     document_size = Column(Integer)
+    submitted_by_id = Column(Integer, ForeignKey("users.id"))  # audit: who uploaded the filing
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True))
+
+    submitted_by = relationship("User")
 
     def to_payload(self) -> dict:
         return {
